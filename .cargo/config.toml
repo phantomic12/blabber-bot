@@ -1,0 +1,6 @@
+# libopus_sys (via songbird) builds Opus from source with CMake. CMake's
+# autodetection on this machine prefers a Visual Studio install that has no C++
+# toolchain, so pin the generator to a working one. The environment variable
+# overrides this; adjust or delete if your setup differs.
+[env]
+CMAKE_GENERATOR = "Visual Studio 17 2022"

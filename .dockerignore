@@ -1,0 +1,18 @@
+# Build artifacts and VCS
+target/
+.git/
+.github/
+
+# Secrets and local state must never enter the image
+.env
+cookies.txt
+*.log
+
+# Windows-only cargo pin breaks the Linux build; not needed in the context
+.cargo/
+
+# Not needed inside the image
+Dockerfile
+docker-compose.yml
+README.md
+.env.example

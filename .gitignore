@@ -1,0 +1,4 @@
+/target
+.env
+cookies.txt
+*.log

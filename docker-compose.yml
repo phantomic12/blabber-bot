@@ -1,0 +1,35 @@
+services:
+  blabber-bot:
+    build: .
+    image: blabber-bot:latest
+    container_name: blabber-bot
+    # Reap the yt-dlp child processes and forward signals properly.
+    init: true
+    restart: unless-stopped
+    env_file:
+      # Copy .env.example to .env first; required:false keeps `docker compose`
+      # runnable before that, and the bot explains what's missing on start.
+      - path: .env
+        required: false
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      # Queues and settings survive restarts here.
+      DATABASE_PATH: /home/bot/data/blabber-bot.db
+    volumes:
+      # Persistent queue/settings database.
+      - bot-data:/home/bot/data
+      # Cache yt-dlp's extractor results between restarts.
+      - yt-dlp-cache:/home/bot/.cache/yt-dlp
+      # Age-restricted playback: export cookies.txt from a signed-in browser
+      # (see README), mount it read-only, and set in .env:
+      #   YTDLP_COOKIES=/home/bot/cookies.txt
+      # - ./cookies.txt:/home/bot/cookies.txt:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-data:
+  yt-dlp-cache:
