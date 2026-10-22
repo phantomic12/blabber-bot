@@ -36,11 +36,11 @@ FROM node:22-bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && pip3 install --no-cache-dir --break-system-packages -U yt-dlp \
+    && pip3 install --no-cache-dir --break-system-packages -U yt-dlp yt-dlp-ejs \
     && useradd --create-home --uid 10001 bot \
     # Pre-create the data dir so the named volume inherits bot's ownership.
-    && mkdir -p /home/bot/data \
-    && chown bot:bot /home/bot/data
+    && mkdir -p /home/bot/data /home/bot/.cache/yt-dlp \
+    && chown -R bot:bot /home/bot/data /home/bot/.cache
 
 COPY --from=builder /usr/src/blabber-bot/target/release/blabber-bot /usr/local/bin/blabber-bot
 
