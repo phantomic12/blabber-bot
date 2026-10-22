@@ -80,7 +80,10 @@ async fn run() -> anyhow::Result<()> {
     http.set_application_id(app.id);
     info!("Authenticated as application {} ({})", app.name, app.id);
 
-    let register_http = http.clone();
+    // `Http` is not `Clone`, so move a freshly built one into the task and keep
+    // the original for the client builder below.
+    let register_http = Http::new(&config.token);
+    register_http.set_application_id(app.id);
     let guild_id = config.guild_id;
     tokio::spawn(async move {
         info!("Clearing pre-existing slash commands...");

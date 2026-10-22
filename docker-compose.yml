@@ -20,11 +20,12 @@ services:
       - bot-data:/home/bot/data
       # Cache yt-dlp's extractor results between restarts.
       - yt-dlp-cache:/home/bot/.cache/yt-dlp
-      # Age-restricted playback: export cookies.txt from a signed-in browser
-      # (see README) and set YTDLP_COOKIES=/home/bot/cookies.txt in .env.
-      # Mounted read-write: yt-dlp rewrites the cookie jar after a successful
-      # extraction (rotated session cookies), and fails on a read-only file.
-      # - ./cookies.txt:/home/bot/cookies.txt
+      # Age-restricted playback: export cookies.txt from a signed-in, age-verified
+      # browser session (see README). Mounted read-only as the *source*: the entrypoint
+      # copies it to a writable jar in the data volume and points YTDLP_COOKIES at that
+      # copy, because yt-dlp rewrites the jar on every extraction and would otherwise
+      # overwrite (and degrade) your export.
+      # - ./cookies.txt:/home/bot/cookies.source:ro
     logging:
       driver: json-file
       options:

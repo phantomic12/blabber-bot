@@ -43,8 +43,9 @@ RUN apt-get update \
     && chown -R bot:bot /home/bot/data /home/bot/.cache
 
 COPY --from=builder /usr/src/blabber-bot/target/release/blabber-bot /usr/local/bin/blabber-bot
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 USER bot
 ENV RUST_LOG=info
 
-ENTRYPOINT ["blabber-bot"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
