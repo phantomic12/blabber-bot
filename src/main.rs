@@ -23,6 +23,12 @@ impl EventHandler for Handler {
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         if let Interaction::Command(command) = interaction {
+            info!(
+                command = %command.data.name,
+                user = %command.user.name,
+                guild = ?command.guild_id,
+                "received slash command"
+            );
             if let Err(err) = commands::dispatch(&ctx, &self.shared, &command).await {
                 error!(command = %command.data.name, %err, "command dispatch failed");
                 let _ = command
@@ -61,8 +67,11 @@ async fn run() -> anyhow::Result<()> {
 
     let config = Arc::new(Config::from_env()?);
 
-    // Slash command setup happens at init, before the gateway connects: wipe
-    // anything registered previously (global and per guild), then set ours.
+    // Command registration runs on its own task, in parallel with the gateway
+    // connection, so a slow clear/register cycle can't leave the bot connected
+    // but deaf. Deleting and re-adding every command is rate limited to 5 per
+    // 20s per guild, which is ~85s for a 21-command set — long enough that
+    // awaiting it before connecting made every restart a blackout.
     let http = Http::new(&config.token);
     let app = http
         .get_current_application_info()
@@ -71,12 +80,24 @@ async fn run() -> anyhow::Result<()> {
     http.set_application_id(app.id);
     info!("Authenticated as application {} ({})", app.name, app.id);
 
-    info!("Clearing pre-existing slash commands...");
-    commands::clear_existing(&http).await?;
-    match config.guild_id {
-        Some(guild_id) => commands::register_for_guild(&http, GuildId::new(guild_id)).await?,
-        None => commands::register(&http).await?,
-    }
+    let register_http = http.clone();
+    let guild_id = config.guild_id;
+    tokio::spawn(async move {
+        info!("Clearing pre-existing slash commands...");
+        if let Err(err) = commands::clear_existing(&register_http).await {
+            error!(%err, "failed to clear pre-existing slash commands");
+            return;
+        }
+        let result = match guild_id {
+            Some(guild_id) => {
+                commands::register_for_guild(&register_http, GuildId::new(guild_id)).await
+            }
+            None => commands::register(&register_http).await,
+        };
+        if let Err(err) = result {
+            error!(%err, "failed to register slash commands");
+        }
+    });
 
     let db = Db::open(&config.database_path).context("failed to open the state database")?;
     let songbird = Songbird::serenity();
