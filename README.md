@@ -113,6 +113,7 @@ already in [.gitignore](.gitignore)) — anyone with it can use your account.
 | `DISCORD_TOKEN` | — | Bot token (required) |
 | `YTDLP_PATH` | `yt-dlp` | yt-dlp executable |
 | `YTDLP_COOKIES` | — | Netscape cookies.txt for age-restricted/private videos |
+| `YTDLP_COOKIES_SOURCE` | — | Docker only: read-only export the entrypoint copies to `YTDLP_COOKIES` |
 | `YTDLP_COOKIES_FROM_BROWSER` | — | Browser to read cookies from (`firefox`, `chrome`, …) |
 | `YTDLP_EXTRA_ARGS` | — | Extra yt-dlp arguments, space-separated |
 | `MAX_PLAYLIST` | `25` | Max playlist entries per request (1–100) |
@@ -137,7 +138,15 @@ docker compose logs -f
 
 Age-restricted playback works the same as bare-metal: export `cookies.txt`,
 uncomment the cookies mount in [docker-compose.yml](docker-compose.yml), and
-set `YTDLP_COOKIES=/home/bot/cookies.txt` in `.env`.
+set `YTDLP_COOKIES_SOURCE=/home/bot/cookies.source` in `.env`.
+
+The mount is read-only on purpose. yt-dlp rewrites its cookie jar on every
+extraction to persist rotated session cookies, and that rewrite replaces the
+file with yt-dlp's in-memory copy — which drops the login cookies
+(`SID`, `HSID`, `SSID`, `APISID`, `SAPISID`, `LOGIN_INFO`). Pointed straight at
+your export, a single lookup could silently invalidate it. The entrypoint copies
+the source to a writable jar under the `bot-data` volume and points
+`YTDLP_COOKIES` there, so your export stays pristine.
 
 Notes:
 
