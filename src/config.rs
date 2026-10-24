@@ -3,6 +3,9 @@
 use anyhow::Context as _;
 use std::path::PathBuf;
 
+/// Default grace period before leaving an empty voice channel, in seconds.
+const DEFAULT_EMPTY_TIMEOUT_SECS: u64 = 300;
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Discord bot token (`DISCORD_TOKEN`).
@@ -26,6 +29,9 @@ pub struct Config {
     pub guild_id: Option<u64>,
     /// Where the SQLite state database lives (`DATABASE_PATH`).
     pub database_path: PathBuf,
+    /// How long to keep playing in a voice channel with nobody else in it
+    /// (`EMPTY_CHANNEL_TIMEOUT`, seconds; `0` disables the behaviour).
+    pub empty_channel_timeout: Option<std::time::Duration>,
 }
 
 impl Config {
@@ -60,6 +66,10 @@ impl Config {
             .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(true);
 
+        // Discord voice is a shared experience; a bot playing to an empty
+        // channel just burns bandwidth and yt-dlp lookups.
+        let empty_channel_timeout = parse_empty_timeout(opt_var("EMPTY_CHANNEL_TIMEOUT").as_deref());
+
         Ok(Self {
             token,
             ytdlp_path: opt_var("YTDLP_PATH").unwrap_or_else(|| "yt-dlp".to_string()),
@@ -75,12 +85,30 @@ impl Config {
             database_path: opt_var("DATABASE_PATH")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("blabber-bot.db")),
+            empty_channel_timeout,
         })
     }
 
     /// Default volume expressed as the multiplier songbird expects.
     pub fn default_volume_scale(&self) -> f32 {
         self.default_volume as f32 / 100.0
+    }
+}
+
+/// Parses `EMPTY_CHANNEL_TIMEOUT` into the idle grace period.
+///
+/// Unset or unparseable falls back to the 5-minute default; an explicit `0`
+/// (and only `0`) disables the behaviour entirely. Silence about the setting
+/// should give sensible behaviour rather than an unexpected opt-out, so a typo
+/// must not be read as "never time out".
+fn parse_empty_timeout(raw: Option<&str>) -> Option<std::time::Duration> {
+    match raw {
+        None => Some(std::time::Duration::from_secs(DEFAULT_EMPTY_TIMEOUT_SECS)),
+        Some(value) => match value.parse::<u64>() {
+            Ok(0) => None,
+            Ok(secs) => Some(std::time::Duration::from_secs(secs)),
+            Err(_) => Some(std::time::Duration::from_secs(DEFAULT_EMPTY_TIMEOUT_SECS)),
+        },
     }
 }
 
@@ -124,6 +152,36 @@ mod tests {
             assert_eq!(expand_home("~/cookies.txt"), home.join("cookies.txt"));
             assert_eq!(expand_home("~"), home);
         }
+    }
+
+    #[test]
+    fn empty_timeout_defaults_to_five_minutes() {
+        assert_eq!(
+            parse_empty_timeout(None),
+            Some(std::time::Duration::from_secs(300))
+        );
+    }
+
+    #[test]
+    fn explicit_zero_disables_the_idle_timeout() {
+        assert_eq!(parse_empty_timeout(Some("0")), None);
+    }
+
+    #[test]
+    fn empty_timeout_honours_a_custom_value() {
+        assert_eq!(
+            parse_empty_timeout(Some("90")),
+            Some(std::time::Duration::from_secs(90))
+        );
+    }
+
+    #[test]
+    fn garbage_empty_timeout_falls_back_to_the_default() {
+        // A typo must not silently mean "never disconnect".
+        assert_eq!(
+            parse_empty_timeout(Some("five minutes")),
+            Some(std::time::Duration::from_secs(300))
+        );
     }
 
     #[test]

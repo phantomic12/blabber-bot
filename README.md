@@ -120,6 +120,7 @@ already in [.gitignore](.gitignore)) — anyone with it can use your account.
 | `DEFAULT_VOLUME` | `100` | Startup volume, 0–200% |
 | `DATABASE_PATH` | `blabber-bot.db` | SQLite database for queues + settings |
 | `AUTOPLAY` | `true` | Autoplay related tracks when the queue runs dry |
+| `EMPTY_CHANNEL_TIMEOUT` | `300` | Seconds of empty voice channel before stopping and disconnecting; `0` disables |
 | `DISCORD_GUILD_ID` | — | Register commands on one guild only (instant, for testing) |
 | `RUST_LOG` | `info` | Log level |
 
@@ -180,6 +181,22 @@ Notes:
 | `/settings` | Show this server's playback settings |
 | `/diagnose url:` | Preflight checks + live extraction probe |
 | `/leave` | Disconnect |
+| `/refreshcommands` | Re-sync slash commands with Discord (Manage Server) |
+
+## Behaviour notes
+
+**Idle disconnect.** When everyone leaves the voice channel, the bot keeps
+playing for `EMPTY_CHANNEL_TIMEOUT` seconds (default 5 minutes) and then stops,
+clears the queue, and disconnects. The grace period exists so a brief
+disconnect-and-rejoin — a client update, a dropped connection, walking out of
+range — doesn't kill the session. If someone returns before it expires, the
+countdown is cancelled silently. Set `EMPTY_CHANNEL_TIMEOUT=0` to stay connected
+indefinitely.
+
+**Slash commands.** Registration is a single bulk `PUT` per boot, which replaces
+the whole command set atomically. `/refreshcommands` re-runs it at runtime, so
+adding or renaming a command no longer needs a restart. Discord also caches
+commands client-side; `Ctrl+R` clears that if they look stale.
 
 ## Development
 

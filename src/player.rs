@@ -202,6 +202,10 @@ pub struct Shared {
     /// Persistent queue/settings storage.
     pub db: Arc<Db>,
     pub players: RwLock<HashMap<GuildId, GuildPlayer>>,
+    /// Generation counter per guild for the empty-channel timer. Bumping it
+    /// invalidates any pending timer, which is how a listener rejoining cancels
+    /// the scheduled disconnect without tracking `JoinHandle`s.
+    pub empty_timers: Mutex<HashMap<GuildId, u64>>,
 }
 
 impl Shared {
@@ -213,7 +217,97 @@ impl Shared {
             http_client: reqwest::Client::new(),
             db,
             players: RwLock::new(HashMap::new()),
+            empty_timers: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Cancels any pending empty-channel disconnect for this guild.
+    pub async fn cancel_empty_timer(&self, guild_id: GuildId) {
+        let mut timers = self.empty_timers.lock().await;
+        let generation = timers.entry(guild_id).or_insert(0);
+        *generation = generation.wrapping_add(1);
+    }
+
+    /// Schedules a stop-and-disconnect for when the voice channel stays empty.
+    ///
+    /// The returned task re-checks both the generation (so a rejoin cancels it)
+    /// and the live voice state (so a stale count can't disconnect a populated
+    /// channel) before acting.
+    pub fn schedule_empty_disconnect(self: &Arc<Self>, ctx: Context, guild_id: GuildId) {
+        let Some(timeout) = self.config.empty_channel_timeout else {
+            return;
+        };
+
+        let shared = self.clone();
+        tokio::spawn(async move {
+            // Claim a generation up front; any bump after this point — a user
+            // joining, or a `/play` arriving — makes this timer a no-op.
+            let generation = {
+                let mut timers = shared.empty_timers.lock().await;
+                let generation = timers.entry(guild_id).or_insert(0);
+                *generation = generation.wrapping_add(1);
+                *generation
+            };
+
+            tokio::time::sleep(timeout).await;
+
+            // Still the newest timer?
+            {
+                let timers = shared.empty_timers.lock().await;
+                if timers.get(&guild_id).copied() != Some(generation) {
+                    return;
+                }
+            }
+
+            // Someone came back during the sleep without triggering an event we
+            // hooked? Re-check live state before acting.
+            if occupied_listener_count(&ctx, guild_id) > 0 {
+                tracing::info!(%guild_id, "channel repopulated during idle window, staying");
+                return;
+            }
+
+            tracing::info!(%guild_id, ?timeout, "voice channel empty past timeout, disconnecting");
+            shared.disconnect_after_idle(&ctx, guild_id).await;
+        });
+    }
+
+    /// Stops playback, clears queue state, disconnects, and announces why.
+    async fn disconnect_after_idle(&self, ctx: &Context, guild_id: GuildId) {
+        let notice = {
+            let mut players = self.players.write().await;
+            match players.get_mut(&guild_id) {
+                Some(player) => {
+                    player.disarm_current();
+                    player.queue.clear();
+                    player.current = None;
+                    player.handle = None;
+                    player.paused = false;
+                    player.text_channel
+                }
+                None => None,
+            }
+        };
+
+        if let Some(call) = self.songbird.get(guild_id) {
+            call.lock().await.stop();
+        }
+        if let Err(err) = self.songbird.remove(guild_id).await {
+            tracing::warn!(%err, %guild_id, "failed to disconnect after idle");
+        }
+
+        let minutes = self
+            .config
+            .empty_channel_timeout
+            .map(|d| d.as_secs().div_ceil(60))
+            .unwrap_or(0);
+        let message = format!(
+            "👋 Everyone left, so I stopped playing and disconnected after {minutes} minute(s) of silence."
+        );
+        if let Some(channel_id) = notice {
+            let _ = channel_id
+                .send_message(ctx.clone(), CreateMessage::new().content(message))
+                .await;
+        }
     }
 
     /// Rehydrates players from persisted state at startup.
@@ -262,6 +356,33 @@ impl Shared {
             player.disarm_current();
         }
     }
+}
+
+/// Counts humans (not bots) sharing the bot's voice channel.
+///
+/// Returns 0 when the bot isn't in voice, which the idle timer treats as "nobody
+/// to play for". Unlike the vote counter this is not clamped to 1 — the idle
+/// path needs the real number.
+pub fn occupied_listener_count(ctx: &Context, guild_id: GuildId) -> usize {
+    let Some(guild) = ctx.cache.guild(guild_id) else {
+        // Cache miss: assume someone is listening rather than disconnecting on
+        // a cold cache.
+        return 1;
+    };
+    let bot_id = ctx.cache.current_user().id;
+    let Some(bot_channel) = guild.voice_states.get(&bot_id).and_then(|state| state.channel_id)
+    else {
+        return 0;
+    };
+
+    guild
+        .voice_states
+        .values()
+        .filter(|state| state.channel_id == Some(bot_channel))
+        .filter(|state| {
+            state.user_id != bot_id && ctx.cache.user(state.user_id).is_none_or(|user| !user.bot)
+        })
+        .count()
 }
 
 /// A lazily instantiated media stream.

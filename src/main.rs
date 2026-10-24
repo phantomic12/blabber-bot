@@ -1,14 +1,14 @@
 //! Bot bootstrap: command registration at init, gateway startup, event routing.
 
 use anyhow::Context as _;
-use blabber_bot::{commands, config::Config, persistence::Db, player::Shared};
+use blabber_bot::{commands, config::Config, persistence::Db, player, player::Shared};
 use serenity::all::{
     Client, Context, EditInteractionResponse, EventHandler, GatewayIntents, GuildId, Http,
     Interaction, Ready, VoiceState,
 };
 use songbird::{SerenityInit, Songbird};
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 struct Handler {
@@ -38,18 +38,47 @@ impl EventHandler for Handler {
         }
     }
 
-    async fn voice_state_update(&self, ctx: Context, _old: Option<VoiceState>, new: VoiceState) {
+    async fn voice_state_update(&self, ctx: Context, old: Option<VoiceState>, new: VoiceState) {
+        let Some(guild_id) = new.guild_id else {
+            return;
+        };
+        let bot_id = ctx.cache.current_user().id;
+
         // If the bot itself lost its voice channel (kicked, moved to nothing,
         // server outage), drop the guild's playback state.
-        if new.channel_id.is_none() {
-            if let Some(guild_id) = new.guild_id {
-                if new.user_id == ctx.cache.current_user().id {
-                    info!(%guild_id, "disconnected from voice, clearing player state");
-                    self.shared.remove_player(guild_id).await;
-                    let _ = self.shared.songbird.remove(guild_id).await;
-                }
-            }
+        if new.user_id == bot_id && new.channel_id.is_none() {
+            info!(%guild_id, "disconnected from voice, clearing player state");
+            self.shared.remove_player(guild_id).await;
+            self.shared.cancel_empty_timer(guild_id).await;
+            let _ = self.shared.songbird.remove(guild_id).await;
+            return;
         }
+
+        // Only react to humans moving between channels; bots joining (including
+        // this one) and mute/deafen changes don't change who is listening.
+        if new.user_id == bot_id {
+            return;
+        }
+        let was_in = old.as_ref().and_then(|state| state.channel_id);
+        let is_in = new.channel_id;
+        if was_in == is_in {
+            return;
+        }
+
+        // Nothing playing means there's nothing to time out.
+        if self.shared.songbird.get(guild_id).is_none() {
+            return;
+        }
+
+        if player::occupied_listener_count(&ctx, guild_id) > 0 {
+            // Someone is present: cancel any countdown in progress.
+            self.shared.cancel_empty_timer(guild_id).await;
+            return;
+        }
+
+        // The channel just emptied — start the countdown.
+        info!(%guild_id, "voice channel is now empty, starting idle countdown");
+        self.shared.schedule_empty_disconnect(ctx.clone(), guild_id);
     }
 }
 
@@ -84,21 +113,22 @@ async fn run() -> anyhow::Result<()> {
     // the original for the client builder below.
     let register_http = Http::new(&config.token);
     register_http.set_application_id(app.id);
-    let guild_id = config.guild_id;
+    let guild_id = config.guild_id.map(GuildId::new);
     tokio::spawn(async move {
-        info!("Clearing pre-existing slash commands...");
-        if let Err(err) = commands::clear_existing(&register_http).await {
-            error!(%err, "failed to clear pre-existing slash commands");
+        // One bulk PUT replaces the whole set, so this costs a single request
+        // instead of one per command.
+        if let Err(err) = commands::sync(&register_http, guild_id).await {
+            error!(%err, "failed to sync slash commands");
             return;
         }
-        let result = match guild_id {
-            Some(guild_id) => {
-                commands::register_for_guild(&register_http, GuildId::new(guild_id)).await
-            }
-            None => commands::register(&register_http).await,
-        };
-        if let Err(err) = result {
-            error!(%err, "failed to register slash commands");
+
+        // Sweep up leftovers from a previous scope (global commands, or a guild
+        // the bot no longer lives in). Cheap and non-fatal: stale commands are
+        // cosmetic, so a failure here must not stop the bot from serving.
+        match commands::prune_stale(&register_http, guild_id).await {
+            Ok(0) => {}
+            Ok(removed) => info!("Pruned {removed} stale slash command(s) from other scopes"),
+            Err(err) => warn!(%err, "could not prune stale slash commands"),
         }
     });
 

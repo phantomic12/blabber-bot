@@ -8,7 +8,6 @@ use serenity::all::{
     CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse, GuildId,
     Http, Permissions, ResolvedOption, ResolvedValue,
 };
-use serenity::http::GuildPagination;
 use songbird::Call;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -119,58 +118,69 @@ pub fn definitions() -> Vec<CreateCommand> {
                 "Video URL to probe (e.g. an age-restricted one)",
             )),
         CreateCommand::new("leave").description("Disconnect the bot from voice"),
+        CreateCommand::new("refreshcommands")
+            .description("Re-sync this bot's slash commands with Discord (Manage Server)")
+            .default_member_permissions(Permissions::MANAGE_GUILD),
     ]
 }
 
-/// Registers commands on a single guild — visible instantly, ideal for testing.
-pub async fn register_for_guild(http: &Http, guild_id: GuildId) -> anyhow::Result<()> {
+/// Replaces the command set, returning how many commands are now live.
+///
+/// `PUT /applications/{id}/guilds/{guild}/commands` (and its global twin) is a
+/// *bulk overwrite*: it replaces the whole set in one request. So there is no
+/// reason to delete commands first — doing that costs one request per command
+/// against a 5-per-20s bucket, which is how a 21-command set once blacked the
+/// bot out for 85 seconds on every restart. Sync once, atomic, done.
+pub async fn sync(http: &Http, guild_id: Option<GuildId>) -> anyhow::Result<usize> {
     let commands = definitions();
-    http.create_guild_commands(guild_id, &commands).await?;
-    tracing::info!(count = commands.len(), %guild_id, "registered slash commands on test guild");
-    Ok(())
+    let count = commands.len();
+
+    match guild_id {
+        Some(guild_id) => {
+            http.create_guild_commands(guild_id, &commands).await?;
+            tracing::info!(count, %guild_id, "synced slash commands to guild");
+        }
+        None => {
+            http.create_global_commands(&commands).await?;
+            tracing::info!(count, "synced global slash commands");
+        }
+    }
+
+    Ok(count)
 }
 
-/// Deletes every pre-existing application command, both global and
-/// guild-scoped, in every guild the bot can see.
-pub async fn clear_existing(http: &Http) -> anyhow::Result<()> {
-    let globals = http.get_global_commands().await?;
-    for command in &globals {
+/// Removes every command of the scope that is *not* in this bot's set.
+///
+/// The bulk overwrite in [`sync`] already drops stale commands, so this is only
+/// needed when migrating away from a scope — e.g. clearing guild commands that
+/// were left in a previous home guild, or global commands superseded by
+/// guild-scoped ones. Commands that are still defined are left alone.
+pub async fn prune_stale(http: &Http, keep_guild: Option<GuildId>) -> anyhow::Result<usize> {
+    let mut removed = 0;
+
+    // Global commands would duplicate the guild-scoped set, so they always go.
+    for command in &http.get_global_commands().await? {
         http.delete_global_command(command.id).await?;
-    }
-    if !globals.is_empty() {
-        tracing::info!(count = globals.len(), "removed pre-existing global commands");
+        removed += 1;
     }
 
-    let mut pagination = None;
-    loop {
-        let guilds = http.get_guilds(pagination, Some(200)).await?;
-        let done = guilds.len() < 200;
-
-        for guild in &guilds {
-            let commands = http.get_guild_commands(guild.id).await?;
-            for command in &commands {
-                http.delete_guild_command(guild.id, command.id).await?;
-            }
-            if !commands.is_empty() {
-                tracing::info!(guild = %guild.id, count = commands.len(), "removed guild-scoped commands");
-            }
+    // Guilds other than the configured home shouldn't carry this bot's
+    // commands at all — a leftover set there shows up as ghost commands.
+    for guild in &http.get_guilds(None, Some(200)).await? {
+        if Some(guild.id) == keep_guild {
+            continue;
         }
-
-        if done {
-            break;
+        let commands = http.get_guild_commands(guild.id).await?;
+        for command in &commands {
+            http.delete_guild_command(guild.id, command.id).await?;
+            removed += 1;
         }
-        pagination = guilds.last().map(|guild| GuildPagination::After(guild.id));
+        if !commands.is_empty() {
+            tracing::info!(guild = %guild.id, count = commands.len(), "pruned commands from other guild");
+        }
     }
 
-    Ok(())
-}
-
-/// Replaces the global command set with this bot's commands.
-pub async fn register(http: &Http) -> anyhow::Result<()> {
-    let commands = definitions();
-    Command::set_global_commands(http, commands.clone()).await?;
-    tracing::info!(count = commands.len(), "registered slash commands");
-    Ok(())
+    Ok(removed)
 }
 
 type CmdResult = Result<String, String>;
@@ -202,6 +212,7 @@ async fn run_command(
         "settings" => settings(shared, cmd).await,
         "diagnose" => diagnose(shared, cmd).await,
         "leave" => leave(shared, cmd).await,
+        "refreshcommands" => refresh_commands(ctx, shared, cmd).await,
         "skip" => skip(ctx, shared, cmd).await,
         other => Err(format!("unknown command '{other}'")),
     }
@@ -292,6 +303,10 @@ async fn play(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> 
             None
         }
     };
+
+    // A `/play` means somebody is in the channel and listening, so any idle
+    // countdown from a previous emptied channel is obsolete.
+    shared.cancel_empty_timer(guild_id).await;
 
     let reply = match to_start {
         Some(meta) => {
@@ -668,6 +683,7 @@ async fn leave(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
         return Err("I'm not connected to a voice channel".to_string());
     }
 
+    shared.cancel_empty_timer(guild_id).await;
     shared.forget(guild_id).await;
     shared
         .songbird
@@ -744,6 +760,39 @@ async fn diagnose(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
     }
 
     Ok(lines.join("\n"))
+}
+
+/// Re-pushes the command definitions to Discord without a restart.
+///
+/// Useful when the bot's command set changed but the container is still
+/// running the old registration, or when slash commands have gone stale in the
+/// client (Discord caches them per-scope and per-client for a while).
+async fn refresh_commands(
+    ctx: &Context,
+    _shared: &Arc<Shared>,
+    cmd: &CommandInteraction,
+) -> CmdResult {
+    require_manage_guild(cmd)?;
+    let guild_id = guild_of(cmd)?;
+
+    // `ctx.http` carries the application id the gateway set up, so no extra
+    // auth round-trip is needed here.
+    let count = sync(&ctx.http, Some(guild_id))
+        .await
+        .map_err(|err| format!("failed to sync slash commands: {err}"))?;
+
+    // Prune anything left in other guilds (e.g. a previous home guild) so the
+    // command list can't appear twice.
+    let pruned = prune_stale(&ctx.http, Some(guild_id)).await.unwrap_or(0);
+
+    Ok(format!(
+        "🔄 **{count}** command(s) synced to this server.{}_Reloading your Discord client (Ctrl+R) refreshes the local cache if they still look stale._",
+        if pruned > 0 {
+            format!(" Removed {pruned} stale command(s) from other scopes.")
+        } else {
+            String::new()
+        }
+    ))
 }
 
 async fn dj_role_set(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
