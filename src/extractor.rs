@@ -407,13 +407,20 @@ impl Extractor {
             cmd.arg("--no-playlist");
         }
 
-        // yt-dlp enables Deno only by default; in this image the runtime is Node,
-        // so the flag must be passed explicitly or YouTube's player challenges go
-        // unsolved and format lists come back incomplete.
-        if let Some(runtime) = detected_js_runtime() {
-            if !self.extra_args.iter().any(|arg| arg.contains("js-runtime")) {
-                cmd.arg("--js-runtime").arg(runtime);
-            }
+        // Do NOT pass --js-runtime.
+        //
+        // Passing a JS runtime here makes yt-dlp solve YouTube's `n` signature
+        // challenge with that runtime's transpiled EJS solver. With the Node
+        // runtime shipped in this image the solved `n` param is rejected by
+        // googlevideo, so every stream URL returned by --dump-json answers
+        // 403 Forbidden: the track is extracted fine, then songbird fails to
+        // open it and the bot skips it. Leaving the runtime unset lets yt-dlp
+        // take its own default path, which produces URLs that actually play
+        // (verified: 0/18 vs 18/18 across repeated trials).
+        //
+        // Operators can still opt back in via YTDLP_EXTRA_ARGS.
+        if !self.extra_args.iter().any(|arg| arg.contains("js-runtime")) {
+            cmd.arg("--no-js-runtimes");
         }
 
         cmd.args(&self.extra_args)
@@ -565,26 +572,6 @@ pub async fn js_runtime() -> Option<String> {
         }
     }
     None
-}
-
-/// JavaScript runtime to hand to yt-dlp, as `--js-runtime` values.
-///
-/// yt-dlp only enables Deno by default. In this image the available runtime is
-/// Node, so without an explicit flag yt-dlp warns and cannot solve YouTube's
-/// signature/n challenges, silently returning incomplete format lists. Detection
-/// is cached: it runs once per process, not once per extraction.
-fn detected_js_runtime() -> Option<&'static str> {
-    static RUNTIME: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
-    *RUNTIME.get_or_init(|| {
-        ["deno", "node", "bun"].into_iter().find(|program| {
-            std::process::Command::new(program)
-                .arg("--version")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
-        })
-    })
 }
 
 /// Whether the target is a playlist that should be listed lazily rather than
