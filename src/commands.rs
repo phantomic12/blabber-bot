@@ -4,7 +4,7 @@ use crate::extractor::TrackMeta;
 use crate::format;
 use crate::player::{self, AdvanceReason, GuildPlayer, LoopMode, Shared};
 use serenity::all::{
-    Command, CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
+    CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
     CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse, GuildId,
     Http, Permissions, ResolvedOption, ResolvedValue,
 };
