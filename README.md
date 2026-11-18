@@ -32,8 +32,9 @@ music-bot feature set **plus age-restricted video support**.
 
 Windows note: songbird builds libopus from source with CMake. If CMake picks a
 Visual Studio install without C++ tools, set `CMAKE_GENERATOR` to one that has
-them — [.cargo/config.toml](.cargo/config.toml) already pins
-`Visual Studio 17 2022` for this machine.
+them. Do not commit that pin -- a generator name is machine-specific and breaks
+CI: `Visual Studio 17 2022` is rejected on Linux outright, and on GitHub's
+Windows runners it stops CMake from finding the installed toolchain.
 
 ## Setup
 

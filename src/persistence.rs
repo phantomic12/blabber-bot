@@ -36,7 +36,10 @@ pub struct Db {
 impl Db {
     /// Opens (creating if needed) the state database at `path`.
     pub fn open(path: &Path) -> anyhow::Result<Arc<Self>> {
-        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             std::fs::create_dir_all(parent)?;
         }
 
@@ -49,7 +52,9 @@ impl Db {
             );",
         )?;
 
-        Ok(Arc::new(Self { conn: Mutex::new(conn) }))
+        Ok(Arc::new(Self {
+            conn: Mutex::new(conn),
+        }))
     }
 
     /// Loads every persisted guild state.
@@ -63,7 +68,10 @@ impl Db {
         let mut out = Vec::new();
         for row in rows {
             let (guild_id, json) = row?;
-            let parsed = guild_id.parse::<u64>().ok().zip(serde_json::from_str(&json).ok());
+            let parsed = guild_id
+                .parse::<u64>()
+                .ok()
+                .zip(serde_json::from_str(&json).ok());
             if let Some((guild_id, state)) = parsed {
                 out.push((guild_id, state));
             }

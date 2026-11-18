@@ -48,7 +48,10 @@ async fn round_trips_guild_state() {
     let (guild_id, restored) = &loaded[0];
     assert_eq!(*guild_id, 42);
     assert_eq!(restored.queue.len(), 2);
-    assert_eq!(restored.current.as_ref().map(|meta| meta.title.as_str()), Some("now"));
+    assert_eq!(
+        restored.current.as_ref().map(|meta| meta.title.as_str()),
+        Some("now")
+    );
     assert_eq!(restored.loop_mode, LoopMode::Queue);
     assert_eq!(restored.volume, 0.7);
     assert!(restored.autoplay);
@@ -76,11 +79,17 @@ async fn save_is_an_upsert_and_delete_clears() {
     };
 
     db.save(1, &make(vec![meta("a")])).await.expect("save");
-    db.save(1, &make(vec![meta("a"), meta("b")])).await.expect("overwrite");
+    db.save(1, &make(vec![meta("a"), meta("b")]))
+        .await
+        .expect("overwrite");
 
     let loaded = db.load_all().await.expect("load");
     assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].1.queue.len(), 2, "second save should replace the first");
+    assert_eq!(
+        loaded[0].1.queue.len(),
+        2,
+        "second save should replace the first"
+    );
 
     db.delete(1).await.expect("delete");
     assert!(db.load_all().await.expect("load").is_empty());
