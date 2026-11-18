@@ -4,11 +4,10 @@ use crate::extractor::TrackMeta;
 use crate::format;
 use crate::player::{self, AdvanceReason, GuildPlayer, LoopMode, Shared};
 use serenity::all::{
-    Command, CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
+    CommandInteraction, CommandOptionType, Context, CreateCommand, CreateCommandOption,
     CreateInteractionResponse, CreateInteractionResponseMessage, EditInteractionResponse, GuildId,
     Http, Permissions, ResolvedOption, ResolvedValue,
 };
-use serenity::http::GuildPagination;
 use songbird::Call;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -30,9 +29,13 @@ pub fn definitions() -> Vec<CreateCommand> {
         CreateCommand::new("skipto")
             .description("Skip to a track in the queue, dropping everything before it")
             .add_option(
-                CreateCommandOption::new(CommandOptionType::Integer, "position", "Queue position (1 = next track)")
-                    .required(true)
-                    .min_int_value(1),
+                CreateCommandOption::new(
+                    CommandOptionType::Integer,
+                    "position",
+                    "Queue position (1 = next track)",
+                )
+                .required(true)
+                .min_int_value(1),
             ),
         CreateCommand::new("stop").description("Stop playback and clear the queue"),
         CreateCommand::new("pause").description("Pause playback"),
@@ -40,8 +43,12 @@ pub fn definitions() -> Vec<CreateCommand> {
         CreateCommand::new("seek")
             .description("Seek to a position in the current track")
             .add_option(
-                CreateCommandOption::new(CommandOptionType::String, "position", "Timestamp: 90, 1:30 or 1:02:03")
-                    .required(true),
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "position",
+                    "Timestamp: 90, 1:30 or 1:02:03",
+                )
+                .required(true),
             ),
         CreateCommand::new("volume")
             .description("Set the playback volume")
@@ -51,9 +58,12 @@ pub fn definitions() -> Vec<CreateCommand> {
                     .min_int_value(0)
                     .max_int_value(200),
             ),
-        CreateCommand::new("queue").description("Show the queue").add_option(
-            CreateCommandOption::new(CommandOptionType::Integer, "page", "Page number").min_int_value(1),
-        ),
+        CreateCommand::new("queue")
+            .description("Show the queue")
+            .add_option(
+                CreateCommandOption::new(CommandOptionType::Integer, "page", "Page number")
+                    .min_int_value(1),
+            ),
         CreateCommand::new("nowplaying").description("Show the current track"),
         CreateCommand::new("shuffle").description("Shuffle the queue"),
         CreateCommand::new("loop")
@@ -119,58 +129,69 @@ pub fn definitions() -> Vec<CreateCommand> {
                 "Video URL to probe (e.g. an age-restricted one)",
             )),
         CreateCommand::new("leave").description("Disconnect the bot from voice"),
+        CreateCommand::new("refreshcommands")
+            .description("Re-sync this bot's slash commands with Discord (Manage Server)")
+            .default_member_permissions(Permissions::MANAGE_GUILD),
     ]
 }
 
-/// Registers commands on a single guild — visible instantly, ideal for testing.
-pub async fn register_for_guild(http: &Http, guild_id: GuildId) -> anyhow::Result<()> {
+/// Replaces the command set, returning how many commands are now live.
+///
+/// `PUT /applications/{id}/guilds/{guild}/commands` (and its global twin) is a
+/// *bulk overwrite*: it replaces the whole set in one request. So there is no
+/// reason to delete commands first — doing that costs one request per command
+/// against a 5-per-20s bucket, which is how a 21-command set once blacked the
+/// bot out for 85 seconds on every restart. Sync once, atomic, done.
+pub async fn sync(http: &Http, guild_id: Option<GuildId>) -> anyhow::Result<usize> {
     let commands = definitions();
-    http.create_guild_commands(guild_id, &commands).await?;
-    tracing::info!(count = commands.len(), %guild_id, "registered slash commands on test guild");
-    Ok(())
+    let count = commands.len();
+
+    match guild_id {
+        Some(guild_id) => {
+            http.create_guild_commands(guild_id, &commands).await?;
+            tracing::info!(count, %guild_id, "synced slash commands to guild");
+        }
+        None => {
+            http.create_global_commands(&commands).await?;
+            tracing::info!(count, "synced global slash commands");
+        }
+    }
+
+    Ok(count)
 }
 
-/// Deletes every pre-existing application command, both global and
-/// guild-scoped, in every guild the bot can see.
-pub async fn clear_existing(http: &Http) -> anyhow::Result<()> {
-    let globals = http.get_global_commands().await?;
-    for command in &globals {
+/// Removes every command of the scope that is *not* in this bot's set.
+///
+/// The bulk overwrite in [`sync`] already drops stale commands, so this is only
+/// needed when migrating away from a scope — e.g. clearing guild commands that
+/// were left in a previous home guild, or global commands superseded by
+/// guild-scoped ones. Commands that are still defined are left alone.
+pub async fn prune_stale(http: &Http, keep_guild: Option<GuildId>) -> anyhow::Result<usize> {
+    let mut removed = 0;
+
+    // Global commands would duplicate the guild-scoped set, so they always go.
+    for command in &http.get_global_commands().await? {
         http.delete_global_command(command.id).await?;
-    }
-    if !globals.is_empty() {
-        tracing::info!(count = globals.len(), "removed pre-existing global commands");
+        removed += 1;
     }
 
-    let mut pagination = None;
-    loop {
-        let guilds = http.get_guilds(pagination, Some(200)).await?;
-        let done = guilds.len() < 200;
-
-        for guild in &guilds {
-            let commands = http.get_guild_commands(guild.id).await?;
-            for command in &commands {
-                http.delete_guild_command(guild.id, command.id).await?;
-            }
-            if !commands.is_empty() {
-                tracing::info!(guild = %guild.id, count = commands.len(), "removed guild-scoped commands");
-            }
+    // Guilds other than the configured home shouldn't carry this bot's
+    // commands at all — a leftover set there shows up as ghost commands.
+    for guild in &http.get_guilds(None, Some(200)).await? {
+        if Some(guild.id) == keep_guild {
+            continue;
         }
-
-        if done {
-            break;
+        let commands = http.get_guild_commands(guild.id).await?;
+        for command in &commands {
+            http.delete_guild_command(guild.id, command.id).await?;
+            removed += 1;
         }
-        pagination = guilds.last().map(|guild| GuildPagination::After(guild.id));
+        if !commands.is_empty() {
+            tracing::info!(guild = %guild.id, count = commands.len(), "pruned commands from other guild");
+        }
     }
 
-    Ok(())
-}
-
-/// Replaces the global command set with this bot's commands.
-pub async fn register(http: &Http) -> anyhow::Result<()> {
-    let commands = definitions();
-    Command::set_global_commands(http, commands.clone()).await?;
-    tracing::info!(count = commands.len(), "registered slash commands");
-    Ok(())
+    Ok(removed)
 }
 
 type CmdResult = Result<String, String>;
@@ -202,13 +223,18 @@ async fn run_command(
         "settings" => settings(shared, cmd).await,
         "diagnose" => diagnose(shared, cmd).await,
         "leave" => leave(shared, cmd).await,
+        "refreshcommands" => refresh_commands(ctx, shared, cmd).await,
         "skip" => skip(ctx, shared, cmd).await,
         other => Err(format!("unknown command '{other}'")),
     }
 }
 
 /// Entry point for slash command interactions.
-pub async fn dispatch(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> Result<(), String> {
+pub async fn dispatch(
+    ctx: &Context,
+    shared: &Arc<Shared>,
+    cmd: &CommandInteraction,
+) -> Result<(), String> {
     cmd.create_response(
         &ctx.http,
         CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
@@ -222,7 +248,7 @@ pub async fn dispatch(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteract
         "pause" | "resume" | "seek" => Some(Control::Track),
         "skipto" | "stop" | "volume" | "shuffle" | "loop" | "remove" | "clear" | "leave" => {
             Some(Control::Queue)
-        },
+        }
         _ => None,
     };
 
@@ -279,7 +305,9 @@ async fn play(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> 
 
     let to_start = {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
         player.text_channel = Some(cmd.channel_id);
 
         for track in tracks {
@@ -293,6 +321,10 @@ async fn play(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> 
         }
     };
 
+    // A `/play` means somebody is in the channel and listening, so any idle
+    // countdown from a previous emptied channel is obsolete.
+    shared.cancel_empty_timer(guild_id).await;
+
     let reply = match to_start {
         Some(meta) => {
             let call = ensure_call(shared, guild_id, channel_id).await?;
@@ -300,7 +332,7 @@ async fn play(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> 
                 .await
                 .map_err(|err| format!("couldn't start playback: {err}"))?;
             format!("▶️ Now playing {}", describe(&meta))
-        },
+        }
         None => {
             let position = {
                 let players = shared.players.read().await;
@@ -313,7 +345,7 @@ async fn play(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> 
                     "✅ Queued **{total}** tracks — positions **1–{position}** (next up: **{first_title}**)"
                 )
             }
-        },
+        }
     };
 
     shared.persist(guild_id).await;
@@ -327,7 +359,10 @@ async fn skip(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> 
 
     let next = player::advance(ctx, shared, guild_id, AdvanceReason::Skipped).await;
     Ok(match next {
-        Some(next) => format!("⏭️ Skipped **{skipped_title}** — now playing {}", describe(&next)),
+        Some(next) => format!(
+            "⏭️ Skipped **{skipped_title}** — now playing {}",
+            describe(&next)
+        ),
         None => format!("⏭️ Skipped **{skipped_title}**. The queue is empty."),
     })
 }
@@ -409,11 +444,15 @@ async fn set_paused(shared: &Arc<Shared>, cmd: &CommandInteraction, pause: bool)
 
     let handle = player.handle.as_ref().ok_or("nothing is playing")?;
     if pause {
-        handle.pause().map_err(|err| format!("couldn't pause: {err}"))?;
+        handle
+            .pause()
+            .map_err(|err| format!("couldn't pause: {err}"))?;
         player.paused = true;
         Ok(format!("⏸️ Paused **{title}**."))
     } else {
-        handle.play().map_err(|err| format!("couldn't resume: {err}"))?;
+        handle
+            .play()
+            .map_err(|err| format!("couldn't resume: {err}"))?;
         player.paused = false;
         Ok(format!("▶️ Resumed **{title}**."))
     }
@@ -457,7 +496,9 @@ async fn volume(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
 
     {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
         player.volume = level as f32 / 100.0;
 
         if let Some(handle) = &player.handle {
@@ -502,7 +543,11 @@ async fn queue(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
     let shown = player.queue.iter().skip(start).take(PER_PAGE);
     for (offset, meta) in shown.enumerate() {
         let position = start + offset + 1;
-        lines.push(format!("**{position}.** {} — {}", describe(meta), meta.requester));
+        lines.push(format!(
+            "**{position}.** {} — {}",
+            describe(meta),
+            meta.requester
+        ));
     }
 
     if lines.is_empty() {
@@ -525,7 +570,10 @@ async fn nowplaying(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult
     let meta = player.current.as_ref().ok_or("nothing is playing")?;
     let handle = player.handle.as_ref().ok_or("nothing is playing")?;
 
-    let state = handle.get_info().await.map_err(|err| format!("couldn't read playback state: {err}"))?;
+    let state = handle
+        .get_info()
+        .await
+        .map_err(|err| format!("couldn't read playback state: {err}"))?;
 
     let mut lines = vec![format!(
         "{} {}",
@@ -537,7 +585,10 @@ async fn nowplaying(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult
     if !bar.is_empty() {
         lines.push(bar);
     } else {
-        lines.push(format!("**{}** elapsed", format::fmt_count(state.position.as_secs())));
+        lines.push(format!(
+            "**{}** elapsed",
+            format::fmt_count(state.position.as_secs())
+        ));
     }
 
     let source = meta
@@ -592,7 +643,9 @@ async fn set_loop(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
     let guild_id = guild_of(cmd)?;
     {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
         player.loop_mode = mode;
     }
     shared.persist(guild_id).await;
@@ -628,7 +681,9 @@ async fn clear(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
     let guild_id = guild_of(cmd)?;
     let cleared = {
         let mut players = shared.players.write().await;
-        let player = players.get_mut(&guild_id).ok_or("the queue is already empty")?;
+        let player = players
+            .get_mut(&guild_id)
+            .ok_or("the queue is already empty")?;
 
         let cleared = player.queue.len();
         if cleared == 0 {
@@ -648,7 +703,9 @@ async fn autoplay(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
 
     let reply = {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
 
         player.autoplay = option_bool(&opts, "enabled").unwrap_or(!player.autoplay);
         format!(
@@ -668,6 +725,7 @@ async fn leave(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
         return Err("I'm not connected to a voice channel".to_string());
     }
 
+    shared.cancel_empty_timer(guild_id).await;
     shared.forget(guild_id).await;
     shared
         .songbird
@@ -694,7 +752,7 @@ async fn diagnose(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
             if !hint.is_empty() {
                 lines.push(format!("_{hint}_"));
             }
-        },
+        }
     }
 
     match crate::extractor::js_runtime().await {
@@ -710,7 +768,11 @@ async fn diagnose(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
     lines.push(shared.extractor.cookie_status());
 
     let started = Instant::now();
-    match shared.extractor.resolve("never gonna give you up", "diagnose").await {
+    match shared
+        .extractor
+        .resolve("never gonna give you up", "diagnose")
+        .await
+    {
         Ok(tracks) => lines.push(format!(
             "Smoke test: ✅ resolved **{}** in {:.1}s",
             tracks[0].title,
@@ -734,9 +796,9 @@ async fn diagnose(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
                     if !hint.is_empty() {
                         lines.push(format!("_{hint}_"));
                     }
-                },
+                }
             }
-        },
+        }
         None => lines.push(
             "_Tip: run `/diagnose url:<age-restricted link>` to verify the age-restricted path._"
                 .to_string(),
@@ -746,19 +808,57 @@ async fn diagnose(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
     Ok(lines.join("\n"))
 }
 
+/// Re-pushes the command definitions to Discord without a restart.
+///
+/// Useful when the bot's command set changed but the container is still
+/// running the old registration, or when slash commands have gone stale in the
+/// client (Discord caches them per-scope and per-client for a while).
+async fn refresh_commands(
+    ctx: &Context,
+    _shared: &Arc<Shared>,
+    cmd: &CommandInteraction,
+) -> CmdResult {
+    require_manage_guild(cmd)?;
+    let guild_id = guild_of(cmd)?;
+
+    // `ctx.http` carries the application id the gateway set up, so no extra
+    // auth round-trip is needed here.
+    let count = sync(&ctx.http, Some(guild_id))
+        .await
+        .map_err(|err| format!("failed to sync slash commands: {err}"))?;
+
+    // Prune anything left in other guilds (e.g. a previous home guild) so the
+    // command list can't appear twice.
+    let pruned = prune_stale(&ctx.http, Some(guild_id)).await.unwrap_or(0);
+
+    Ok(format!(
+        "🔄 **{count}** command(s) synced to this server.{}_Reloading your Discord client (Ctrl+R) refreshes the local cache if they still look stale._",
+        if pruned > 0 {
+            format!(" Removed {pruned} stale command(s) from other scopes.")
+        } else {
+            String::new()
+        }
+    ))
+}
+
 async fn dj_role_set(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
     require_manage_guild(cmd)?;
     let opts = cmd.data.options();
     let guild_id = guild_of(cmd)?;
 
-    let role = opts.iter().find(|opt| opt.name == "role").and_then(|opt| match opt.value {
-        ResolvedValue::Role(role) => Some(role.id),
-        _ => None,
-    });
+    let role = opts
+        .iter()
+        .find(|opt| opt.name == "role")
+        .and_then(|opt| match opt.value {
+            ResolvedValue::Role(role) => Some(role.id),
+            _ => None,
+        });
 
     {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
         player.dj_role = role;
     }
     shared.persist(guild_id).await;
@@ -778,9 +878,14 @@ async fn set_requester_only(shared: &Arc<Shared>, cmd: &CommandInteraction) -> C
 
     let reply = {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
         player.requester_only = option_bool(&opts, "enabled").unwrap_or(!player.requester_only);
-        format!("🔒 Requester-only mode is now **{}**.", on_off(player.requester_only))
+        format!(
+            "🔒 Requester-only mode is now **{}**.",
+            on_off(player.requester_only)
+        )
     };
     shared.persist(guild_id).await;
 
@@ -794,7 +899,9 @@ async fn set_voteskip(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResu
 
     let reply = {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
 
         player.vote_skip = option_bool(&opts, "enabled").unwrap_or(!player.vote_skip);
         if let Some(threshold) = option_int(&opts, "threshold") {
@@ -837,7 +944,11 @@ async fn settings(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
 }
 
 /// Registers a skip vote, performing the skip once enough votes are in.
-async fn cast_skip_vote(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
+async fn cast_skip_vote(
+    ctx: &Context,
+    shared: &Arc<Shared>,
+    cmd: &CommandInteraction,
+) -> CmdResult {
     let guild_id = guild_of(cmd)?;
     caller_voice_channel(ctx, cmd)?;
 
@@ -854,7 +965,9 @@ async fn cast_skip_vote(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandIntera
     };
 
     if votes < needed {
-        return Ok(format!("🗳️ Vote to skip: **{votes}/{needed}** — run `/skip` to vote."));
+        return Ok(format!(
+            "🗳️ Vote to skip: **{votes}/{needed}** — run `/skip` to vote."
+        ));
     }
 
     let (_call, title) = stop_current(shared, guild_id).await?;
@@ -864,7 +977,9 @@ async fn cast_skip_vote(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandIntera
             "🗳️ Vote passed ({votes}/{needed}) — skipped **{title}**. Now playing {}",
             describe(&next)
         ),
-        None => format!("🗳️ Vote passed ({votes}/{needed}) — skipped **{title}**. The queue is empty."),
+        None => {
+            format!("🗳️ Vote passed ({votes}/{needed}) — skipped **{title}**. The queue is empty.")
+        }
     })
 }
 
@@ -944,7 +1059,9 @@ fn is_privileged(cmd: &CommandInteraction, player: &GuildPlayer) -> bool {
         }
     }
 
-    player.dj_role.is_some_and(|role| member.roles.contains(&role))
+    player
+        .dj_role
+        .is_some_and(|role| member.roles.contains(&role))
 }
 
 /// Number of non-bot members in the bot's voice channel — the voting body.
@@ -953,7 +1070,10 @@ fn voice_voter_count(ctx: &Context, guild_id: GuildId) -> usize {
         return 1;
     };
     let bot_id = ctx.cache.current_user().id;
-    let Some(bot_channel) = guild.voice_states.get(&bot_id).and_then(|state| state.channel_id)
+    let Some(bot_channel) = guild
+        .voice_states
+        .get(&bot_id)
+        .and_then(|state| state.channel_id)
     else {
         return 1;
     };
@@ -988,7 +1108,11 @@ fn require_manage_guild(cmd: &CommandInteraction) -> Result<(), String> {
 }
 
 fn on_off(value: bool) -> &'static str {
-    if value { "on" } else { "off" }
+    if value {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 /// Stops the current track — disarming its terminator first so the end event
@@ -1038,11 +1162,15 @@ async fn ensure_call(
 }
 
 fn guild_of(cmd: &CommandInteraction) -> Result<GuildId, String> {
-    cmd.guild_id.ok_or_else(|| "this command only works in a server".to_string())
+    cmd.guild_id
+        .ok_or_else(|| "this command only works in a server".to_string())
 }
 
 /// The voice channel the invoking user is in.
-fn caller_voice_channel(ctx: &Context, cmd: &CommandInteraction) -> Result<serenity::all::ChannelId, String> {
+fn caller_voice_channel(
+    ctx: &Context,
+    cmd: &CommandInteraction,
+) -> Result<serenity::all::ChannelId, String> {
     let guild_id = guild_of(cmd)?;
     let guild = ctx
         .cache

@@ -26,24 +26,36 @@ pub fn parse_timestamp(input: &str) -> Result<u64, String> {
     let parts: Vec<&str> = input.split(':').collect();
 
     let secs = match parts.as_slice() {
-        [s] => s.parse::<u64>().map_err(|_| format!("'{input}' is not a valid timestamp"))?,
+        [s] => s
+            .parse::<u64>()
+            .map_err(|_| format!("'{input}' is not a valid timestamp"))?,
         [m, s] => {
-            let m: u64 = m.parse().map_err(|_| format!("'{input}' is not a valid timestamp"))?;
-            let s: u64 = s.parse().map_err(|_| format!("'{input}' is not a valid timestamp"))?;
+            let m: u64 = m
+                .parse()
+                .map_err(|_| format!("'{input}' is not a valid timestamp"))?;
+            let s: u64 = s
+                .parse()
+                .map_err(|_| format!("'{input}' is not a valid timestamp"))?;
             if s >= 60 {
                 return Err(format!("'{input}' has seconds out of range"));
             }
             m * 60 + s
-        },
+        }
         [h, m, s] => {
-            let h: u64 = h.parse().map_err(|_| format!("'{input}' is not a valid timestamp"))?;
-            let m: u64 = m.parse().map_err(|_| format!("'{input}' is not a valid timestamp"))?;
-            let s: u64 = s.parse().map_err(|_| format!("'{input}' is not a valid timestamp"))?;
+            let h: u64 = h
+                .parse()
+                .map_err(|_| format!("'{input}' is not a valid timestamp"))?;
+            let m: u64 = m
+                .parse()
+                .map_err(|_| format!("'{input}' is not a valid timestamp"))?;
+            let s: u64 = s
+                .parse()
+                .map_err(|_| format!("'{input}' is not a valid timestamp"))?;
             if m >= 60 || s >= 60 {
                 return Err(format!("'{input}' has minutes/seconds out of range"));
             }
             h * 3600 + m * 60 + s
-        },
+        }
         _ => return Err(format!("'{input}' is not a valid timestamp")),
     };
 

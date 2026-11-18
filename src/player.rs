@@ -164,7 +164,7 @@ impl GuildPlayer {
                         self.queue.push_back(finished);
                     }
                     self.queue.pop_front()
-                },
+                }
                 LoopMode::Off => self.queue.pop_front(),
             },
             // Skipped and errored tracks are never re-played.
@@ -202,6 +202,10 @@ pub struct Shared {
     /// Persistent queue/settings storage.
     pub db: Arc<Db>,
     pub players: RwLock<HashMap<GuildId, GuildPlayer>>,
+    /// Generation counter per guild for the empty-channel timer. Bumping it
+    /// invalidates any pending timer, which is how a listener rejoining cancels
+    /// the scheduled disconnect without tracking `JoinHandle`s.
+    pub empty_timers: Mutex<HashMap<GuildId, u64>>,
 }
 
 impl Shared {
@@ -213,7 +217,101 @@ impl Shared {
             http_client: reqwest::Client::new(),
             db,
             players: RwLock::new(HashMap::new()),
+            empty_timers: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Cancels any pending empty-channel disconnect for this guild.
+    pub async fn cancel_empty_timer(&self, guild_id: GuildId) {
+        let mut timers = self.empty_timers.lock().await;
+        let generation = timers.entry(guild_id).or_insert(0);
+        *generation = generation.wrapping_add(1);
+    }
+
+    /// Schedules a stop-and-disconnect for when the voice channel stays empty.
+    ///
+    /// The returned task re-checks both the generation (so a rejoin cancels it)
+    /// and the live voice state (so a stale count can't disconnect a populated
+    /// channel) before acting.
+    pub fn schedule_empty_disconnect(self: &Arc<Self>, ctx: Context, guild_id: GuildId) {
+        let Some(timeout) = self.config.empty_channel_timeout else {
+            return;
+        };
+
+        let shared = self.clone();
+        tokio::spawn(async move {
+            // Claim a generation up front; any bump after this point — a user
+            // joining, or a `/play` arriving — makes this timer a no-op.
+            let generation = {
+                let mut timers = shared.empty_timers.lock().await;
+                let generation = timers.entry(guild_id).or_insert(0);
+                *generation = generation.wrapping_add(1);
+                *generation
+            };
+
+            tokio::time::sleep(timeout).await;
+
+            // Still the newest timer?
+            {
+                let timers = shared.empty_timers.lock().await;
+                if timers.get(&guild_id).copied() != Some(generation) {
+                    return;
+                }
+            }
+
+            // Someone came back during the sleep without triggering an event we
+            // hooked? Re-check live state before acting.
+            if occupied_listener_count(&ctx, guild_id) > 0 {
+                tracing::info!(%guild_id, "channel repopulated during idle window, staying");
+                return;
+            }
+
+            tracing::info!(%guild_id, ?timeout, "voice channel empty past timeout, disconnecting");
+            shared.disconnect_after_idle(&ctx, guild_id).await;
+        });
+    }
+
+    /// Stops playback, clears queue state, disconnects, and announces why.
+    async fn disconnect_after_idle(&self, ctx: &Context, guild_id: GuildId) {
+        let notice = {
+            let mut players = self.players.write().await;
+            match players.get_mut(&guild_id) {
+                Some(player) => {
+                    player.disarm_current();
+                    player.queue.clear();
+                    player.current = None;
+                    player.handle = None;
+                    player.paused = false;
+                    player.text_channel
+                }
+                None => None,
+            }
+        };
+
+        // Write the emptied queue through, or a restart restores the tracks
+        // this disconnect just discarded and plays them to nobody.
+        self.persist(guild_id).await;
+
+        if let Some(call) = self.songbird.get(guild_id) {
+            call.lock().await.stop();
+        }
+        if let Err(err) = self.songbird.remove(guild_id).await {
+            tracing::warn!(%err, %guild_id, "failed to disconnect after idle");
+        }
+
+        let minutes = self
+            .config
+            .empty_channel_timeout
+            .map(|d| d.as_secs().div_ceil(60))
+            .unwrap_or(0);
+        let message = format!(
+            "👋 Everyone left, so I stopped playing and disconnected after {minutes} minute(s) of silence."
+        );
+        if let Some(channel_id) = notice {
+            let _ = channel_id
+                .send_message(ctx.clone(), CreateMessage::new().content(message))
+                .await;
+        }
     }
 
     /// Rehydrates players from persisted state at startup.
@@ -248,12 +346,36 @@ impl Shared {
         }
     }
 
+    /// Drops a guild's queue and current track, keeping its settings (volume,
+    /// loop mode, DJ role) and persisting the empty queue.
+    ///
+    /// Used when the bot is disconnected from voice by something other than a
+    /// command: the queue is gone for good, but the server's preferences are
+    /// not collateral damage.
+    pub async fn drop_queue(&self, guild_id: GuildId) {
+        {
+            let mut players = self.players.write().await;
+            if let Some(player) = players.get_mut(&guild_id) {
+                player.disarm_current();
+                player.queue.clear();
+                player.current = None;
+                player.handle = None;
+                player.paused = false;
+                player.skip_votes.clear();
+            }
+        }
+        self.persist(guild_id).await;
+    }
+
     /// Creates the player for a guild if it doesn't exist yet.
-    pub async fn ensure_player(&self, guild_id: GuildId) -> tokio::sync::RwLockWriteGuard<'_, HashMap<GuildId, GuildPlayer>> {
+    pub async fn ensure_player(
+        &self,
+        guild_id: GuildId,
+    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<GuildId, GuildPlayer>> {
         let mut players = self.players.write().await;
-        players
-            .entry(guild_id)
-            .or_insert_with(|| GuildPlayer::new(self.config.default_volume_scale(), self.config.autoplay));
+        players.entry(guild_id).or_insert_with(|| {
+            GuildPlayer::new(self.config.default_volume_scale(), self.config.autoplay)
+        });
         players
     }
 
@@ -262,6 +384,36 @@ impl Shared {
             player.disarm_current();
         }
     }
+}
+
+/// Counts humans (not bots) sharing the bot's voice channel.
+///
+/// Returns 0 when the bot isn't in voice, which the idle timer treats as "nobody
+/// to play for". Unlike the vote counter this is not clamped to 1 — the idle
+/// path needs the real number.
+pub fn occupied_listener_count(ctx: &Context, guild_id: GuildId) -> usize {
+    let Some(guild) = ctx.cache.guild(guild_id) else {
+        // Cache miss: assume someone is listening rather than disconnecting on
+        // a cold cache.
+        return 1;
+    };
+    let bot_id = ctx.cache.current_user().id;
+    let Some(bot_channel) = guild
+        .voice_states
+        .get(&bot_id)
+        .and_then(|state| state.channel_id)
+    else {
+        return 0;
+    };
+
+    guild
+        .voice_states
+        .values()
+        .filter(|state| state.channel_id == Some(bot_channel))
+        .filter(|state| {
+            state.user_id != bot_id && ctx.cache.user(state.user_id).is_none_or(|user| !user.bot)
+        })
+        .count()
 }
 
 /// A lazily instantiated media stream.
@@ -280,7 +432,9 @@ impl Compose for TrackSource {
         Err(AudioStreamError::Unsupported)
     }
 
-    async fn create_async(&mut self) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
+    async fn create_async(
+        &mut self,
+    ) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
         let mut meta = self.meta.clone();
 
         if meta.needs_resolution() {
@@ -403,7 +557,7 @@ impl EventHandler for TrackTerminator {
                 Some(meta) => announce_now_playing(&ctx, &shared, guild_id, &meta).await,
                 None => {
                     announce(&ctx, &shared, guild_id, "🏁 Queue finished.").await;
-                },
+                }
             }
         });
 
@@ -421,7 +575,10 @@ pub async fn play_track(
 ) -> anyhow::Result<()> {
     let volume = {
         let players = shared.players.read().await;
-        players.get(&guild_id).map(|p| p.volume).unwrap_or_else(|| shared.config.default_volume_scale())
+        players
+            .get(&guild_id)
+            .map(|p| p.volume)
+            .unwrap_or_else(|| shared.config.default_volume_scale())
     };
 
     let source = TrackSource {
@@ -444,7 +601,9 @@ pub async fn play_track(
     }
 
     let mut players = shared.ensure_player(guild_id).await;
-    let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+    let player = players
+        .get_mut(&guild_id)
+        .expect("ensure_player inserts entry");
     player.disarm_current();
     player.note_played(&meta.page_url);
     player.skip_votes.clear();
@@ -467,7 +626,10 @@ pub async fn fill_autoplay(shared: &Arc<Shared>, guild_id: GuildId, seed: &Track
         }
     };
 
-    let related = shared.extractor.related(seed, &history, &seed.requester).await;
+    let related = shared
+        .extractor
+        .related(seed, &history, &seed.requester)
+        .await;
     if related.is_empty() {
         return 0;
     }
@@ -514,7 +676,12 @@ pub async fn advance(
 
 /// Sends `message` to the guild's announce channel, if one is set.
 pub async fn announce(ctx: &Context, shared: &Arc<Shared>, guild_id: GuildId, message: &str) {
-    let channel = shared.players.read().await.get(&guild_id).and_then(|p| p.text_channel);
+    let channel = shared
+        .players
+        .read()
+        .await
+        .get(&guild_id)
+        .and_then(|p| p.text_channel);
     if let Some(channel) = channel {
         if let Err(err) = channel
             .send_message(ctx.clone(), CreateMessage::new().content(message))
@@ -525,7 +692,12 @@ pub async fn announce(ctx: &Context, shared: &Arc<Shared>, guild_id: GuildId, me
     }
 }
 
-pub async fn announce_now_playing(ctx: &Context, shared: &Arc<Shared>, guild_id: GuildId, meta: &TrackMeta) {
+pub async fn announce_now_playing(
+    ctx: &Context,
+    shared: &Arc<Shared>,
+    guild_id: GuildId,
+    meta: &TrackMeta,
+) {
     let mut text = format!("▶️ Now playing **{}**", meta.title);
     if let Some(duration) = meta.duration {
         text.push_str(&format!(" `{}`", format::fmt_secs(Some(duration))));
@@ -578,13 +750,20 @@ mod tests {
     }
 
     fn queue_titles(player: &GuildPlayer) -> Vec<&str> {
-        player.queue.iter().map(|track| track.title.as_str()).collect()
+        player
+            .queue
+            .iter()
+            .map(|track| track.title.as_str())
+            .collect()
     }
 
     #[test]
     fn off_mode_advances_through_the_queue() {
         let mut player = player_with("a", &["b", "c"]);
-        assert_eq!(player.next_after(AdvanceReason::Finished).unwrap().title, "b");
+        assert_eq!(
+            player.next_after(AdvanceReason::Finished).unwrap().title,
+            "b"
+        );
         assert_eq!(queue_titles(&player), &["c"]);
     }
 
@@ -592,7 +771,10 @@ mod tests {
     fn track_loop_replays_the_current_track() {
         let mut player = player_with("a", &["b"]);
         player.loop_mode = LoopMode::Track;
-        assert_eq!(player.next_after(AdvanceReason::Finished).unwrap().title, "a");
+        assert_eq!(
+            player.next_after(AdvanceReason::Finished).unwrap().title,
+            "a"
+        );
         assert_eq!(queue_titles(&player), &["b"]);
     }
 
@@ -600,7 +782,10 @@ mod tests {
     fn queue_loop_requeues_the_finished_track() {
         let mut player = player_with("a", &["b"]);
         player.loop_mode = LoopMode::Queue;
-        assert_eq!(player.next_after(AdvanceReason::Finished).unwrap().title, "b");
+        assert_eq!(
+            player.next_after(AdvanceReason::Finished).unwrap().title,
+            "b"
+        );
         assert_eq!(queue_titles(&player), &["a"]);
     }
 
@@ -608,7 +793,10 @@ mod tests {
     fn skip_never_replays_the_current_track() {
         let mut player = player_with("a", &["b"]);
         player.loop_mode = LoopMode::Track;
-        assert_eq!(player.next_after(AdvanceReason::Skipped).unwrap().title, "b");
+        assert_eq!(
+            player.next_after(AdvanceReason::Skipped).unwrap().title,
+            "b"
+        );
         assert!(player.queue.is_empty());
     }
 

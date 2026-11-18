@@ -32,8 +32,9 @@ music-bot feature set **plus age-restricted video support**.
 
 Windows note: songbird builds libopus from source with CMake. If CMake picks a
 Visual Studio install without C++ tools, set `CMAKE_GENERATOR` to one that has
-them — [.cargo/config.toml](.cargo/config.toml) already pins
-`Visual Studio 17 2022` for this machine.
+them. Do not commit that pin -- a generator name is machine-specific and breaks
+CI: `Visual Studio 17 2022` is rejected on Linux outright, and on GitHub's
+Windows runners it stops CMake from finding the installed toolchain.
 
 ## Setup
 
@@ -113,12 +114,14 @@ already in [.gitignore](.gitignore)) — anyone with it can use your account.
 | `DISCORD_TOKEN` | — | Bot token (required) |
 | `YTDLP_PATH` | `yt-dlp` | yt-dlp executable |
 | `YTDLP_COOKIES` | — | Netscape cookies.txt for age-restricted/private videos |
+| `YTDLP_COOKIES_SOURCE` | — | Docker only: read-only export the entrypoint copies to `YTDLP_COOKIES` |
 | `YTDLP_COOKIES_FROM_BROWSER` | — | Browser to read cookies from (`firefox`, `chrome`, …) |
 | `YTDLP_EXTRA_ARGS` | — | Extra yt-dlp arguments, space-separated |
 | `MAX_PLAYLIST` | `25` | Max playlist entries per request (1–100) |
 | `DEFAULT_VOLUME` | `100` | Startup volume, 0–200% |
 | `DATABASE_PATH` | `blabber-bot.db` | SQLite database for queues + settings |
 | `AUTOPLAY` | `true` | Autoplay related tracks when the queue runs dry |
+| `EMPTY_CHANNEL_TIMEOUT` | `300` | Seconds of empty voice channel before stopping and disconnecting; `0` disables |
 | `DISCORD_GUILD_ID` | — | Register commands on one guild only (instant, for testing) |
 | `RUST_LOG` | `info` | Log level |
 
@@ -137,7 +140,15 @@ docker compose logs -f
 
 Age-restricted playback works the same as bare-metal: export `cookies.txt`,
 uncomment the cookies mount in [docker-compose.yml](docker-compose.yml), and
-set `YTDLP_COOKIES=/home/bot/cookies.txt` in `.env`.
+set `YTDLP_COOKIES_SOURCE=/home/bot/cookies.source` in `.env`.
+
+The mount is read-only on purpose. yt-dlp rewrites its cookie jar on every
+extraction to persist rotated session cookies, and that rewrite replaces the
+file with yt-dlp's in-memory copy — which drops the login cookies
+(`SID`, `HSID`, `SSID`, `APISID`, `SAPISID`, `LOGIN_INFO`). Pointed straight at
+your export, a single lookup could silently invalidate it. The entrypoint copies
+the source to a writable jar under the `bot-data` volume and points
+`YTDLP_COOKIES` there, so your export stays pristine.
 
 Notes:
 
@@ -171,6 +182,22 @@ Notes:
 | `/settings` | Show this server's playback settings |
 | `/diagnose url:` | Preflight checks + live extraction probe |
 | `/leave` | Disconnect |
+| `/refreshcommands` | Re-sync slash commands with Discord (Manage Server) |
+
+## Behaviour notes
+
+**Idle disconnect.** When everyone leaves the voice channel, the bot keeps
+playing for `EMPTY_CHANNEL_TIMEOUT` seconds (default 5 minutes) and then stops,
+clears the queue, and disconnects. The grace period exists so a brief
+disconnect-and-rejoin — a client update, a dropped connection, walking out of
+range — doesn't kill the session. If someone returns before it expires, the
+countdown is cancelled silently. Set `EMPTY_CHANNEL_TIMEOUT=0` to stay connected
+indefinitely.
+
+**Slash commands.** Registration is a single bulk `PUT` per boot, which replaces
+the whole command set atomically. `/refreshcommands` re-runs it at runtime, so
+adding or renaming a command no longer needs a restart. Discord also caches
+commands client-side; `Ctrl+R` clears that if they look stale.
 
 ## Development
 
