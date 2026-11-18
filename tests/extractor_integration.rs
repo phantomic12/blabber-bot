@@ -128,24 +128,33 @@ fn fake_extractor(tag: &str, cookies: Option<PathBuf>, fail_first: bool) -> (Ext
         autoplay: true,
         guild_id: None,
         database_path: PathBuf::from(":memory:"),
+        empty_channel_timeout: None,
     };
 
     (Extractor::new(&config), log)
 }
 
 fn log_lines(path: &Path) -> usize {
-    std::fs::read_to_string(path).map(|text| text.lines().count()).unwrap_or(0)
+    std::fs::read_to_string(path)
+        .map(|text| text.lines().count())
+        .unwrap_or(0)
 }
 
 #[tokio::test]
 async fn resolves_a_search_query() {
     let (extractor, _) = fake_extractor("search", None, false);
 
-    let tracks = extractor.resolve("some song", "tester").await.expect("resolve");
+    let tracks = extractor
+        .resolve("some song", "tester")
+        .await
+        .expect("resolve");
     assert_eq!(tracks.len(), 1);
     assert_eq!(tracks[0].title, "Fake Track 0");
     assert_eq!(tracks[0].requester, "tester");
-    assert!(tracks[0].stream_url.is_some(), "full extraction must resolve a stream URL");
+    assert!(
+        tracks[0].stream_url.is_some(),
+        "full extraction must resolve a stream URL"
+    );
     assert_eq!(tracks[0].age_limit, Some(18));
 }
 
@@ -168,18 +177,31 @@ async fn playlist_targets_list_entries_lazily() {
 async fn age_gate_without_cookies_reports_a_hint() {
     let (extractor, _) = fake_extractor("agegate", None, false);
 
-    let err = extractor.resolve("age-gated thing", "tester").await.expect_err("must fail");
+    let err = extractor
+        .resolve("age-gated thing", "tester")
+        .await
+        .expect_err("must fail");
     assert!(matches!(err, ExtractError::AgeRestricted(_)));
-    assert!(err.hint().contains("YTDLP_COOKIES"), "hint should point at cookie setup");
+    assert!(
+        err.hint().contains("YTDLP_COOKIES"),
+        "hint should point at cookie setup"
+    );
 }
 
 #[tokio::test]
 async fn cookies_unlock_age_gated_content_on_the_first_strategy() {
     let (extractor, log) = fake_extractor("cookies", Some(PathBuf::from("cookies.txt")), false);
 
-    let tracks = extractor.resolve("age-gated thing", "tester").await.expect("resolve");
+    let tracks = extractor
+        .resolve("age-gated thing", "tester")
+        .await
+        .expect("resolve");
     assert_eq!(tracks.len(), 1);
-    assert_eq!(log_lines(&log), 1, "cookie strategy should succeed immediately");
+    assert_eq!(
+        log_lines(&log),
+        1,
+        "cookie strategy should succeed immediately"
+    );
 }
 
 #[tokio::test]
@@ -192,14 +214,20 @@ async fn extraction_falls_back_across_strategies() {
         .expect("resolve after fallback");
     assert_eq!(tracks.len(), 1);
     assert_eq!(log_lines(&log), 2, "first strategy fails, second succeeds");
-    assert!(!strategy.is_empty(), "the winning strategy should be reported");
+    assert!(
+        !strategy.is_empty(),
+        "the winning strategy should be reported"
+    );
 }
 
 #[tokio::test]
 async fn unavailable_content_is_not_found() {
     let (extractor, _) = fake_extractor("missing", None, false);
 
-    let err = extractor.resolve("unavailable thing", "tester").await.expect_err("must fail");
+    let err = extractor
+        .resolve("unavailable thing", "tester")
+        .await
+        .expect_err("must fail");
     assert!(matches!(err, ExtractError::NotFound(_)));
 }
 
@@ -207,5 +235,8 @@ async fn unavailable_content_is_not_found() {
 async fn version_is_reported() {
     let (extractor, _) = fake_extractor("version", None, false);
 
-    assert_eq!(extractor.version().await.expect("version"), "2026.01.01-fake");
+    assert_eq!(
+        extractor.version().await.expect("version"),
+        "2026.01.01-fake"
+    );
 }

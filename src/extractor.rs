@@ -15,7 +15,11 @@ use std::time::{Duration, Instant};
 pub const STREAM_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// Number of related tracks autoplay queues per fill.
-const AUTOPLAY_BATCH: usize = 5;
+///
+/// Deliberately one: autoplay must extend a finished queue by a single track,
+/// never by a batch. Queuing five meant a user who added one song saw four
+/// unexpected entries appear, which reads as the bot inventing a queue.
+const AUTOPLAY_BATCH: usize = 1;
 /// Results pulled when searching for related tracks.
 const RELATED_SEARCH: usize = 8;
 
@@ -86,11 +90,11 @@ impl ExtractError {
                  cookies.txt from a browser signed into an age-verified account and set \
                  YTDLP_COOKIES=/path/to/cookies.txt (or YTDLP_COOKIES_FROM_BROWSER=firefox, \
                  chrome, ...). See the README for details."
-            },
+            }
             Self::MissingBinary(_) => {
                 "Install yt-dlp and make sure it is on PATH (or point YTDLP_PATH at it). \
                  YouTube extraction also needs a JS runtime such as Deno or Node.js 20+."
-            },
+            }
             _ => "",
         }
     }
@@ -127,24 +131,32 @@ impl fmt::Display for ExtractError {
             Self::MissingBinary(program) => write!(f, "could not run '{program}'"),
             Self::AgeRestricted(raw) => {
                 write!(f, "{}", headline_or(raw, "this video is age-restricted"))
-            },
+            }
             Self::Private(raw) => {
-                write!(f, "{}", headline_or(raw, "this video is private or members-only"))
-            },
+                write!(
+                    f,
+                    "{}",
+                    headline_or(raw, "this video is private or members-only")
+                )
+            }
             Self::NotFound(raw) => {
                 write!(f, "{}", headline_or(raw, "no playable results found"))
-            },
+            }
             Self::Timeout => write!(f, "yt-dlp timed out"),
             Self::Failed(raw) => {
                 write!(f, "yt-dlp failed: {}", headline_or(raw, "unknown error"))
-            },
+            }
         }
     }
 }
 
 /// First meaningful line of a yt-dlp error report, without its `ERROR:` tag.
 fn headline(raw: &str) -> &str {
-    let line = raw.lines().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
+    let line = raw
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
     line.strip_prefix("ERROR: ").unwrap_or(line)
 }
 
@@ -191,7 +203,10 @@ impl Extractor {
 
         Self {
             program,
-            cookies_file: config.cookies_file.as_ref().map(|p| p.display().to_string()),
+            cookies_file: config
+                .cookies_file
+                .as_ref()
+                .map(|p| p.display().to_string()),
             cookies_from_browser: config.cookies_from_browser.clone(),
             extra_args: config.ytdlp_extra_args.clone(),
             max_playlist: config.max_playlist,
@@ -202,8 +217,14 @@ impl Extractor {
     }
 
     /// Resolves a user query (search text or URL) into playable tracks.
-    pub async fn resolve(&self, query: &str, requester: &str) -> Result<Vec<TrackMeta>, ExtractError> {
-        self.resolve_detailed(query, requester).await.map(|(tracks, _)| tracks)
+    pub async fn resolve(
+        &self,
+        query: &str,
+        requester: &str,
+    ) -> Result<Vec<TrackMeta>, ExtractError> {
+        self.resolve_detailed(query, requester)
+            .await
+            .map(|(tracks, _)| tracks)
     }
 
     /// As [`resolve`], but also reports which strategy unlocked the content —
@@ -267,7 +288,11 @@ impl Extractor {
     }
 
     /// Resolves a single page URL into one playable track with a fresh stream URL.
-    pub async fn resolve_one(&self, page_url: &str, requester: &str) -> Result<TrackMeta, ExtractError> {
+    pub async fn resolve_one(
+        &self,
+        page_url: &str,
+        requester: &str,
+    ) -> Result<TrackMeta, ExtractError> {
         let (tracks, _) = self.extract(page_url, Extraction::Full, requester).await?;
         tracks
             .into_iter()
@@ -290,8 +315,17 @@ impl Extractor {
 
         if let Some(id) = youtube_video_id(&seed.page_url) {
             // The `RD` mix playlist is YouTube's radio seeded by a video.
+            //
+            // This must force playlist extraction: `is_playlist_target` treats
+            // user-supplied `list=RD..` links as a single video (they are the
+            // Share button's radio URL), but autoplay genuinely wants the whole
+            // radio listing here.
             let mix = format!("https://www.youtube.com/watch?v={id}&list=RD{id}");
-            candidates = self.resolve(&mix, requester).await.unwrap_or_default();
+            candidates = self
+                .extract(&mix, Extraction::Flat, requester)
+                .await
+                .map(|(tracks, _)| tracks)
+                .unwrap_or_default();
         }
 
         if candidates.len() < 2 {
@@ -326,7 +360,7 @@ impl Extractor {
                 Err(err) => {
                     tracing::debug!(target, strategy = label, error = %err, "extraction strategy failed");
                     last_err = Some(err);
-                },
+                }
             }
         }
 
@@ -339,8 +373,10 @@ impl Extractor {
     /// clients which occasionally bypass the age gate without a session.
     fn strategies(&self) -> Vec<(&'static str, Vec<String>)> {
         let cookie_args = self.cookie_args();
-        let age_gate_bypass =
-            vec!["--extractor-args".to_string(), "youtube:player_client=tv,android".to_string()];
+        let age_gate_bypass = vec![
+            "--extractor-args".to_string(),
+            "youtube:player_client=tv,android".to_string(),
+        ];
 
         let mut strategies = Vec::new();
         if !cookie_args.is_empty() {
@@ -400,8 +436,11 @@ impl Extractor {
 
         // Playlist-ish targets expand to their entries (`watch?v=..&list=..`
         // links point at both a video and a playlist); everything else
-        // resolves to just the video it points at.
-        if is_playlist_target(target) {
+        // resolves to just the video it points at. `Extraction::Flat` also
+        // implies a listing: callers that deliberately want a whole playlist
+        // (autoplay's radio mix) pass it explicitly, since a user-supplied
+        // `list=RD..` URL is treated as one video.
+        if mode == Extraction::Flat || is_playlist_target(target) {
             cmd.arg("--yes-playlist");
         } else {
             cmd.arg("--no-playlist");
@@ -452,7 +491,7 @@ impl Extractor {
                 Err(err) => {
                     tracing::debug!(%err, "skipping unparseable yt-dlp entry");
                     None
-                },
+                }
             })
             .collect();
 
@@ -509,11 +548,11 @@ impl YtDlpInfo {
             Extraction::Full => {
                 let page = self.webpage_url.clone().or_else(|| self.url.clone())?;
                 (self.url.clone(), page)
-            },
+            }
             Extraction::Flat => {
                 let page = self.webpage_url.clone().or_else(|| self.url.clone())?;
                 (None, page)
-            },
+            }
         };
 
         if mode == Extraction::Full && stream_url.is_none() {
@@ -559,7 +598,11 @@ fn build_target(query: &str) -> String {
 /// Returns a short description of the first one found.
 pub async fn js_runtime() -> Option<String> {
     for program in ["deno", "node", "bun"] {
-        if let Ok(output) = tokio::process::Command::new(program).arg("--version").output().await {
+        if let Ok(output) = tokio::process::Command::new(program)
+            .arg("--version")
+            .output()
+            .await
+        {
             if output.status.success() {
                 let version = String::from_utf8_lossy(&output.stdout)
                     .lines()
@@ -578,12 +621,34 @@ pub async fn js_runtime() -> Option<String> {
 /// fully extracted up front.
 fn is_playlist_target(target: &str) -> bool {
     let lower = target.to_lowercase();
-    lower.contains("youtube.com/playlist")
-        // `watch?v=..&list=..` style links: playlists and YouTube mixes.
-        || lower.contains("list=")
+    // A bare playlist URL, or a `watch?v=..&list=PL..` link, is a genuine
+    // playlist the user asked for. YouTube *radio* / mix lists (`list=RD..`,
+    // `list=UL..`, plus the `&start_radio=1` flag the Share button appends)
+    // are not: expanding one silently queues `MAX_PLAYLIST` unrelated tracks
+    // off a single pasted video, so those resolve to just their video.
+    let genuine_list = list_id(target).is_some_and(|list| !is_mix_list(list));
+
+    lower.contains("youtube.com/playlist") && genuine_list
+        || lower.contains("list=") && genuine_list
         || (lower.contains("soundcloud.com/") && lower.contains("/sets/"))
         || lower.contains("soundcloud.com/profiles/")
         || (lower.starts_with("ytsearch") && !lower.starts_with("ytsearch1:"))
+}
+
+/// Extracts the `list=` parameter from a URL, if present.
+fn list_id(target: &str) -> Option<&str> {
+    let after = target.split_once("list=")?.1;
+    let id = after
+        .split(|c: char| c == '&' || c == '#' || c == '?')
+        .next()?
+        .trim();
+    (!id.is_empty()).then_some(id)
+}
+
+/// YouTube mix/radio list IDs. `RD` = video radio, `RDAMVM` = music mix,
+/// `UL` = uploads/auto-generated — none of these are playlists the user chose.
+fn is_mix_list(list: &str) -> bool {
+    list.starts_with("RD") || list.starts_with("UL")
 }
 
 /// Extracts an 11-character YouTube video ID from common URL shapes
@@ -611,7 +676,10 @@ mod tests {
 
     #[test]
     fn plain_text_becomes_search() {
-        assert_eq!(build_target("never gonna give you up"), "ytsearch1:never gonna give you up");
+        assert_eq!(
+            build_target("never gonna give you up"),
+            "ytsearch1:never gonna give you up"
+        );
     }
 
     #[test]
@@ -624,10 +692,45 @@ mod tests {
 
     #[test]
     fn playlists_are_detected() {
-        assert!(is_playlist_target("https://www.youtube.com/playlist?list=PL123"));
+        assert!(is_playlist_target(
+            "https://www.youtube.com/playlist?list=PL123"
+        ));
         assert!(is_playlist_target("https://soundcloud.com/user/sets/mix"));
-        assert!(is_playlist_target("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ"));
-        assert!(!is_playlist_target("https://www.youtube.com/watch?v=dQw4w9WgXcQ"));
+        assert!(is_playlist_target(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLdQw4w9WgXcQ"
+        ));
+        assert!(!is_playlist_target(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        ));
+    }
+
+    #[test]
+    fn youtube_radio_mixes_are_not_playlists() {
+        // The Share button's `list=RD...&start_radio=1` link is one video, not
+        // a queue of 25. Expanding it is the "I queued one thing, four more
+        // landed" bug.
+        assert!(!is_playlist_target(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=RDdQw4w9WgXcQ&start_radio=1"
+        ));
+        assert!(!is_playlist_target(
+            "https://music.youtube.com/watch?v=dQw4w9WgXcQ&list=RDAMVMdQw4w9WgXcQ"
+        ));
+        assert!(!is_playlist_target(
+            "https://www.youtube.com/playlist?list=ULdQw4w9WgXcQ"
+        ));
+    }
+
+    #[test]
+    fn list_ids_are_parsed_from_urls() {
+        assert_eq!(
+            list_id("https://www.youtube.com/watch?v=x&list=PLabc&index=2"),
+            Some("PLabc")
+        );
+        assert_eq!(
+            list_id("https://www.youtube.com/playlist?list=RDabc"),
+            Some("RDabc")
+        );
+        assert_eq!(list_id("https://www.youtube.com/watch?v=x"), None);
     }
 
     #[test]

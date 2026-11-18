@@ -32,7 +32,10 @@ impl EventHandler for Handler {
             if let Err(err) = commands::dispatch(&ctx, &self.shared, &command).await {
                 error!(command = %command.data.name, %err, "command dispatch failed");
                 let _ = command
-                    .edit_response(&ctx.http, EditInteractionResponse::new().content(format!("⚠️ {err}")))
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new().content(format!("⚠️ {err}")),
+                    )
                     .await;
             }
         }
@@ -45,11 +48,14 @@ impl EventHandler for Handler {
         let bot_id = ctx.cache.current_user().id;
 
         // If the bot itself lost its voice channel (kicked, moved to nothing,
-        // server outage), drop the guild's playback state.
+        // server outage), drop the guild's queue — in memory *and* in the
+        // database, so it can't be restored on the next restart and resume
+        // playing into an empty channel. Settings (volume, loop, DJ role) are
+        // kept; only the queue goes.
         if new.user_id == bot_id && new.channel_id.is_none() {
             info!(%guild_id, "disconnected from voice, clearing player state");
-            self.shared.remove_player(guild_id).await;
             self.shared.cancel_empty_timer(guild_id).await;
+            self.shared.drop_queue(guild_id).await;
             let _ = self.shared.songbird.remove(guild_id).await;
             return;
         }
@@ -91,7 +97,9 @@ fn main() -> anyhow::Result<()> {
 
 async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     let config = Arc::new(Config::from_env()?);
@@ -154,7 +162,10 @@ async fn run() -> anyhow::Result<()> {
         .context("failed to build the Discord client")?;
 
     info!("Starting gateway...");
-    client.start_autosharded().await.context("gateway connection failed")?;
+    client
+        .start_autosharded()
+        .await
+        .context("gateway connection failed")?;
 
     Ok(())
 }
