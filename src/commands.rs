@@ -29,9 +29,13 @@ pub fn definitions() -> Vec<CreateCommand> {
         CreateCommand::new("skipto")
             .description("Skip to a track in the queue, dropping everything before it")
             .add_option(
-                CreateCommandOption::new(CommandOptionType::Integer, "position", "Queue position (1 = next track)")
-                    .required(true)
-                    .min_int_value(1),
+                CreateCommandOption::new(
+                    CommandOptionType::Integer,
+                    "position",
+                    "Queue position (1 = next track)",
+                )
+                .required(true)
+                .min_int_value(1),
             ),
         CreateCommand::new("stop").description("Stop playback and clear the queue"),
         CreateCommand::new("pause").description("Pause playback"),
@@ -39,8 +43,12 @@ pub fn definitions() -> Vec<CreateCommand> {
         CreateCommand::new("seek")
             .description("Seek to a position in the current track")
             .add_option(
-                CreateCommandOption::new(CommandOptionType::String, "position", "Timestamp: 90, 1:30 or 1:02:03")
-                    .required(true),
+                CreateCommandOption::new(
+                    CommandOptionType::String,
+                    "position",
+                    "Timestamp: 90, 1:30 or 1:02:03",
+                )
+                .required(true),
             ),
         CreateCommand::new("volume")
             .description("Set the playback volume")
@@ -50,9 +58,12 @@ pub fn definitions() -> Vec<CreateCommand> {
                     .min_int_value(0)
                     .max_int_value(200),
             ),
-        CreateCommand::new("queue").description("Show the queue").add_option(
-            CreateCommandOption::new(CommandOptionType::Integer, "page", "Page number").min_int_value(1),
-        ),
+        CreateCommand::new("queue")
+            .description("Show the queue")
+            .add_option(
+                CreateCommandOption::new(CommandOptionType::Integer, "page", "Page number")
+                    .min_int_value(1),
+            ),
         CreateCommand::new("nowplaying").description("Show the current track"),
         CreateCommand::new("shuffle").description("Shuffle the queue"),
         CreateCommand::new("loop")
@@ -219,7 +230,11 @@ async fn run_command(
 }
 
 /// Entry point for slash command interactions.
-pub async fn dispatch(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> Result<(), String> {
+pub async fn dispatch(
+    ctx: &Context,
+    shared: &Arc<Shared>,
+    cmd: &CommandInteraction,
+) -> Result<(), String> {
     cmd.create_response(
         &ctx.http,
         CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
@@ -233,7 +248,7 @@ pub async fn dispatch(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteract
         "pause" | "resume" | "seek" => Some(Control::Track),
         "skipto" | "stop" | "volume" | "shuffle" | "loop" | "remove" | "clear" | "leave" => {
             Some(Control::Queue)
-        },
+        }
         _ => None,
     };
 
@@ -290,7 +305,9 @@ async fn play(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> 
 
     let to_start = {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
         player.text_channel = Some(cmd.channel_id);
 
         for track in tracks {
@@ -315,7 +332,7 @@ async fn play(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> 
                 .await
                 .map_err(|err| format!("couldn't start playback: {err}"))?;
             format!("▶️ Now playing {}", describe(&meta))
-        },
+        }
         None => {
             let position = {
                 let players = shared.players.read().await;
@@ -328,7 +345,7 @@ async fn play(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> 
                     "✅ Queued **{total}** tracks — positions **1–{position}** (next up: **{first_title}**)"
                 )
             }
-        },
+        }
     };
 
     shared.persist(guild_id).await;
@@ -342,7 +359,10 @@ async fn skip(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> 
 
     let next = player::advance(ctx, shared, guild_id, AdvanceReason::Skipped).await;
     Ok(match next {
-        Some(next) => format!("⏭️ Skipped **{skipped_title}** — now playing {}", describe(&next)),
+        Some(next) => format!(
+            "⏭️ Skipped **{skipped_title}** — now playing {}",
+            describe(&next)
+        ),
         None => format!("⏭️ Skipped **{skipped_title}**. The queue is empty."),
     })
 }
@@ -424,11 +444,15 @@ async fn set_paused(shared: &Arc<Shared>, cmd: &CommandInteraction, pause: bool)
 
     let handle = player.handle.as_ref().ok_or("nothing is playing")?;
     if pause {
-        handle.pause().map_err(|err| format!("couldn't pause: {err}"))?;
+        handle
+            .pause()
+            .map_err(|err| format!("couldn't pause: {err}"))?;
         player.paused = true;
         Ok(format!("⏸️ Paused **{title}**."))
     } else {
-        handle.play().map_err(|err| format!("couldn't resume: {err}"))?;
+        handle
+            .play()
+            .map_err(|err| format!("couldn't resume: {err}"))?;
         player.paused = false;
         Ok(format!("▶️ Resumed **{title}**."))
     }
@@ -472,7 +496,9 @@ async fn volume(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
 
     {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
         player.volume = level as f32 / 100.0;
 
         if let Some(handle) = &player.handle {
@@ -517,7 +543,11 @@ async fn queue(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
     let shown = player.queue.iter().skip(start).take(PER_PAGE);
     for (offset, meta) in shown.enumerate() {
         let position = start + offset + 1;
-        lines.push(format!("**{position}.** {} — {}", describe(meta), meta.requester));
+        lines.push(format!(
+            "**{position}.** {} — {}",
+            describe(meta),
+            meta.requester
+        ));
     }
 
     if lines.is_empty() {
@@ -540,7 +570,10 @@ async fn nowplaying(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult
     let meta = player.current.as_ref().ok_or("nothing is playing")?;
     let handle = player.handle.as_ref().ok_or("nothing is playing")?;
 
-    let state = handle.get_info().await.map_err(|err| format!("couldn't read playback state: {err}"))?;
+    let state = handle
+        .get_info()
+        .await
+        .map_err(|err| format!("couldn't read playback state: {err}"))?;
 
     let mut lines = vec![format!(
         "{} {}",
@@ -552,7 +585,10 @@ async fn nowplaying(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult
     if !bar.is_empty() {
         lines.push(bar);
     } else {
-        lines.push(format!("**{}** elapsed", format::fmt_count(state.position.as_secs())));
+        lines.push(format!(
+            "**{}** elapsed",
+            format::fmt_count(state.position.as_secs())
+        ));
     }
 
     let source = meta
@@ -607,7 +643,9 @@ async fn set_loop(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
     let guild_id = guild_of(cmd)?;
     {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
         player.loop_mode = mode;
     }
     shared.persist(guild_id).await;
@@ -643,7 +681,9 @@ async fn clear(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
     let guild_id = guild_of(cmd)?;
     let cleared = {
         let mut players = shared.players.write().await;
-        let player = players.get_mut(&guild_id).ok_or("the queue is already empty")?;
+        let player = players
+            .get_mut(&guild_id)
+            .ok_or("the queue is already empty")?;
 
         let cleared = player.queue.len();
         if cleared == 0 {
@@ -663,7 +703,9 @@ async fn autoplay(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
 
     let reply = {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
 
         player.autoplay = option_bool(&opts, "enabled").unwrap_or(!player.autoplay);
         format!(
@@ -710,7 +752,7 @@ async fn diagnose(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
             if !hint.is_empty() {
                 lines.push(format!("_{hint}_"));
             }
-        },
+        }
     }
 
     match crate::extractor::js_runtime().await {
@@ -726,7 +768,11 @@ async fn diagnose(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
     lines.push(shared.extractor.cookie_status());
 
     let started = Instant::now();
-    match shared.extractor.resolve("never gonna give you up", "diagnose").await {
+    match shared
+        .extractor
+        .resolve("never gonna give you up", "diagnose")
+        .await
+    {
         Ok(tracks) => lines.push(format!(
             "Smoke test: ✅ resolved **{}** in {:.1}s",
             tracks[0].title,
@@ -750,9 +796,9 @@ async fn diagnose(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
                     if !hint.is_empty() {
                         lines.push(format!("_{hint}_"));
                     }
-                },
+                }
             }
-        },
+        }
         None => lines.push(
             "_Tip: run `/diagnose url:<age-restricted link>` to verify the age-restricted path._"
                 .to_string(),
@@ -800,14 +846,19 @@ async fn dj_role_set(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResul
     let opts = cmd.data.options();
     let guild_id = guild_of(cmd)?;
 
-    let role = opts.iter().find(|opt| opt.name == "role").and_then(|opt| match opt.value {
-        ResolvedValue::Role(role) => Some(role.id),
-        _ => None,
-    });
+    let role = opts
+        .iter()
+        .find(|opt| opt.name == "role")
+        .and_then(|opt| match opt.value {
+            ResolvedValue::Role(role) => Some(role.id),
+            _ => None,
+        });
 
     {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
         player.dj_role = role;
     }
     shared.persist(guild_id).await;
@@ -827,9 +878,14 @@ async fn set_requester_only(shared: &Arc<Shared>, cmd: &CommandInteraction) -> C
 
     let reply = {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
         player.requester_only = option_bool(&opts, "enabled").unwrap_or(!player.requester_only);
-        format!("🔒 Requester-only mode is now **{}**.", on_off(player.requester_only))
+        format!(
+            "🔒 Requester-only mode is now **{}**.",
+            on_off(player.requester_only)
+        )
     };
     shared.persist(guild_id).await;
 
@@ -843,7 +899,9 @@ async fn set_voteskip(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResu
 
     let reply = {
         let mut players = shared.ensure_player(guild_id).await;
-        let player = players.get_mut(&guild_id).expect("ensure_player inserts entry");
+        let player = players
+            .get_mut(&guild_id)
+            .expect("ensure_player inserts entry");
 
         player.vote_skip = option_bool(&opts, "enabled").unwrap_or(!player.vote_skip);
         if let Some(threshold) = option_int(&opts, "threshold") {
@@ -886,7 +944,11 @@ async fn settings(shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
 }
 
 /// Registers a skip vote, performing the skip once enough votes are in.
-async fn cast_skip_vote(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandInteraction) -> CmdResult {
+async fn cast_skip_vote(
+    ctx: &Context,
+    shared: &Arc<Shared>,
+    cmd: &CommandInteraction,
+) -> CmdResult {
     let guild_id = guild_of(cmd)?;
     caller_voice_channel(ctx, cmd)?;
 
@@ -903,7 +965,9 @@ async fn cast_skip_vote(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandIntera
     };
 
     if votes < needed {
-        return Ok(format!("🗳️ Vote to skip: **{votes}/{needed}** — run `/skip` to vote."));
+        return Ok(format!(
+            "🗳️ Vote to skip: **{votes}/{needed}** — run `/skip` to vote."
+        ));
     }
 
     let (_call, title) = stop_current(shared, guild_id).await?;
@@ -913,7 +977,9 @@ async fn cast_skip_vote(ctx: &Context, shared: &Arc<Shared>, cmd: &CommandIntera
             "🗳️ Vote passed ({votes}/{needed}) — skipped **{title}**. Now playing {}",
             describe(&next)
         ),
-        None => format!("🗳️ Vote passed ({votes}/{needed}) — skipped **{title}**. The queue is empty."),
+        None => {
+            format!("🗳️ Vote passed ({votes}/{needed}) — skipped **{title}**. The queue is empty.")
+        }
     })
 }
 
@@ -993,7 +1059,9 @@ fn is_privileged(cmd: &CommandInteraction, player: &GuildPlayer) -> bool {
         }
     }
 
-    player.dj_role.is_some_and(|role| member.roles.contains(&role))
+    player
+        .dj_role
+        .is_some_and(|role| member.roles.contains(&role))
 }
 
 /// Number of non-bot members in the bot's voice channel — the voting body.
@@ -1002,7 +1070,10 @@ fn voice_voter_count(ctx: &Context, guild_id: GuildId) -> usize {
         return 1;
     };
     let bot_id = ctx.cache.current_user().id;
-    let Some(bot_channel) = guild.voice_states.get(&bot_id).and_then(|state| state.channel_id)
+    let Some(bot_channel) = guild
+        .voice_states
+        .get(&bot_id)
+        .and_then(|state| state.channel_id)
     else {
         return 1;
     };
@@ -1037,7 +1108,11 @@ fn require_manage_guild(cmd: &CommandInteraction) -> Result<(), String> {
 }
 
 fn on_off(value: bool) -> &'static str {
-    if value { "on" } else { "off" }
+    if value {
+        "on"
+    } else {
+        "off"
+    }
 }
 
 /// Stops the current track — disarming its terminator first so the end event
@@ -1087,11 +1162,15 @@ async fn ensure_call(
 }
 
 fn guild_of(cmd: &CommandInteraction) -> Result<GuildId, String> {
-    cmd.guild_id.ok_or_else(|| "this command only works in a server".to_string())
+    cmd.guild_id
+        .ok_or_else(|| "this command only works in a server".to_string())
 }
 
 /// The voice channel the invoking user is in.
-fn caller_voice_channel(ctx: &Context, cmd: &CommandInteraction) -> Result<serenity::all::ChannelId, String> {
+fn caller_voice_channel(
+    ctx: &Context,
+    cmd: &CommandInteraction,
+) -> Result<serenity::all::ChannelId, String> {
     let guild_id = guild_of(cmd)?;
     let guild = ctx
         .cache

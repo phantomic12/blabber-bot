@@ -68,7 +68,8 @@ impl Config {
 
         // Discord voice is a shared experience; a bot playing to an empty
         // channel just burns bandwidth and yt-dlp lookups.
-        let empty_channel_timeout = parse_empty_timeout(opt_var("EMPTY_CHANNEL_TIMEOUT").as_deref());
+        let empty_channel_timeout =
+            parse_empty_timeout(opt_var("EMPTY_CHANNEL_TIMEOUT").as_deref());
 
         Ok(Self {
             token,
@@ -113,7 +114,10 @@ fn parse_empty_timeout(raw: Option<&str>) -> Option<std::time::Duration> {
 }
 
 fn opt_var(name: &str) -> Option<String> {
-    std::env::var(name).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Unix-friendly path handling: expand a leading `~/` to the user's home
@@ -134,12 +138,16 @@ fn expand_home(value: &str) -> PathBuf {
 
 #[cfg(unix)]
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from)
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
 }
 
 #[cfg(windows)]
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE").filter(|h| !h.is_empty()).map(PathBuf::from)
+    std::env::var_os("USERPROFILE")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -188,6 +196,9 @@ mod tests {
     fn leaves_other_paths_alone() {
         assert_eq!(expand_home("./cookies.txt"), PathBuf::from("./cookies.txt"));
         assert_eq!(expand_home("cookies.txt"), PathBuf::from("cookies.txt"));
-        assert_eq!(expand_home("/home/bot/cookies.txt"), PathBuf::from("/home/bot/cookies.txt"));
+        assert_eq!(
+            expand_home("/home/bot/cookies.txt"),
+            PathBuf::from("/home/bot/cookies.txt")
+        );
     }
 }
