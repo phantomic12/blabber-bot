@@ -638,10 +638,7 @@ fn is_playlist_target(target: &str) -> bool {
 /// Extracts the `list=` parameter from a URL, if present.
 fn list_id(target: &str) -> Option<&str> {
     let after = target.split_once("list=")?.1;
-    let id = after
-        .split(|c: char| c == '&' || c == '#' || c == '?')
-        .next()?
-        .trim();
+    let id = after.split(['&', '#', '?']).next()?.trim();
     (!id.is_empty()).then_some(id)
 }
 
