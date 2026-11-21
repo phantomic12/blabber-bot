@@ -7,7 +7,7 @@
 # so the builder needs cmake plus a C toolchain (present in the rust image).
 # Note: the host's .cargo/config.toml is intentionally not copied — its
 # Windows-only CMAKE_GENERATOR pin would break the Linux build.
-FROM rust:1.89-bookworm AS builder
+FROM rust:1.100-bookworm AS builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake \
